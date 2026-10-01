@@ -121,9 +121,60 @@ double extensionNumber(const tinygltf::Value& ext, const char* key, double fallb
 
 // Translates a glTF metallic-roughness material (plus the transmission, IOR,
 // volume and emissive-strength extensions) into a renderer material.
-Material convertMaterial(const tinygltf::Material& gm)
+// Converts glTF texture `index` into a scene texture (decoded once).
+int convertTexture(const tinygltf::Model& model, int index, Scene& scene, std::vector<int>& textureMap)
 {
-    Material m{};
+    if (index < 0 || index >= (int)model.textures.size())
+    {
+        return -1;
+    }
+    if (textureMap[index] != -2)
+    {
+        return textureMap[index];
+    }
+    int source = model.textures[index].source;
+    textureMap[index] = -1;
+    if (source < 0 || source >= (int)model.images.size())
+    {
+        return -1;
+    }
+    const tinygltf::Image& img = model.images[source];
+    if (img.image.empty() || img.width <= 0 || img.height <= 0)
+    {
+        return -1;
+    }
+    TextureData tex;
+    tex.width = img.width;
+    tex.height = img.height;
+    tex.name = img.name.empty() ? img.uri : img.name;
+    tex.rgba.resize((size_t)img.width * img.height * 4);
+    const int comps = img.component;
+    const int bytes = img.bits == 16 ? 2 : 1;
+    for (size_t i = 0; i < (size_t)img.width * img.height; i++)
+    {
+        for (int c = 0; c < 4; c++)
+        {
+            unsigned char v = c == 3 ? 255 : 0;
+            if (c < comps)
+            {
+                // keep the high byte of 16-bit channels
+                v = img.image[(i * comps + c) * bytes + (bytes - 1)];
+            }
+            else if (c < 3 && comps == 1)
+            {
+                v = img.image[i * bytes + (bytes - 1)];    // grey
+            }
+            tex.rgba[i * 4 + c] = v;
+        }
+    }
+    textureMap[index] = scene.addTexture(std::move(tex));
+    return textureMap[index];
+}
+
+Material convertMaterial(const tinygltf::Model& model, const tinygltf::Material& gm, Scene& scene,
+    std::vector<int>& textureMap)
+{
+    Material m = makeDefaultMaterial();
     const auto& pbr = gm.pbrMetallicRoughness;
     m.type = MATERIAL_PBR;
     m.color = toVec3(pbr.baseColorFactor, glm::vec3(1.0f));
@@ -131,6 +182,11 @@ Material convertMaterial(const tinygltf::Material& gm)
     m.roughness = (float)pbr.roughnessFactor;
     m.ior = 1.5f;
     m.emission = toVec3(gm.emissiveFactor, glm::vec3(0.0f));
+    m.baseColorTex = convertTexture(model, pbr.baseColorTexture.index, scene, textureMap);
+    m.metallicRoughnessTex = convertTexture(model, pbr.metallicRoughnessTexture.index, scene, textureMap);
+    m.normalTex = convertTexture(model, gm.normalTexture.index, scene, textureMap);
+    m.normalScale = (float)gm.normalTexture.scale;
+    m.emissiveTex = convertTexture(model, gm.emissiveTexture.index, scene, textureMap);
 
     auto ext = gm.extensions.find("KHR_materials_emissive_strength");
     if (ext != gm.extensions.end())
@@ -276,9 +332,10 @@ bool loadGLTF(const std::string& path, Scene& scene, int defaultMaterial, MeshDa
     }
 
     std::vector<int> materialMap(model.materials.size());
+    std::vector<int> textureMap(model.textures.size(), -2);
     for (size_t i = 0; i < model.materials.size(); i++)
     {
-        materialMap[i] = scene.addMaterial(convertMaterial(model.materials[i]));
+        materialMap[i] = scene.addMaterial(convertMaterial(model, model.materials[i], scene, textureMap));
     }
 
     int sceneIdx = model.defaultScene >= 0 ? model.defaultScene : 0;
@@ -327,13 +384,18 @@ bool loadOBJ(const std::string& path, Scene& scene, int defaultMaterial, MeshDat
     for (size_t i = 0; i < objMaterials.size(); i++)
     {
         const tinyobj::material_t& om = objMaterials[i];
-        Material m{};
+        Material m = makeDefaultMaterial();
         m.type = MATERIAL_PBR;
         m.color = glm::vec3(om.diffuse[0], om.diffuse[1], om.diffuse[2]);
         m.roughness = om.roughness > 0.0f ? om.roughness : glm::clamp(sqrtf(2.0f / (om.shininess + 2.0f)), 0.0f, 1.0f);
         m.metallic = om.metallic;
         m.ior = om.ior > 1.0f ? om.ior : 1.5f;
         m.emission = glm::vec3(om.emission[0], om.emission[1], om.emission[2]);
+        if (!om.diffuse_texname.empty())
+        {
+            std::string rel = path.substr(scene.sceneDir.size(), dir.size() - scene.sceneDir.size());
+            m.baseColorTex = scene.loadTextureFile(rel + om.diffuse_texname);
+        }
         materialMap[i] = scene.addMaterial(m);
     }
 
@@ -361,7 +423,8 @@ bool loadOBJ(const std::string& path, Scene& scene, int defaultMaterial, MeshDat
                 glm::vec2 uv(0.0f);
                 if (ix.texcoord_index >= 0)
                 {
-                    uv = glm::vec2(attrib.texcoords[2 * ix.texcoord_index], attrib.texcoords[2 * ix.texcoord_index + 1]);
+                    // OBJ puts the UV origin at the bottom left, textures are stored top down
+                    uv = glm::vec2(attrib.texcoords[2 * ix.texcoord_index], 1.0f - attrib.texcoords[2 * ix.texcoord_index + 1]);
                 }
                 mesh.uvs.push_back(uv);
                 mesh.tangents.push_back(glm::vec4(0.0f));

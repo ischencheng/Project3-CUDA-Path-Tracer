@@ -61,6 +61,7 @@ set(headers
     src/sampler.h
     src/scene.h
     src/sceneStructs.h
+    src/textures.h
     src/utilities.h
 )
 

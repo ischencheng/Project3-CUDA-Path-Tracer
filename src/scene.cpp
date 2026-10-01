@@ -7,6 +7,8 @@
 #include <glm/gtx/string_cast.hpp>
 #include "json.hpp"
 
+#include <stb_image.h>
+
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -37,9 +39,55 @@ static glm::vec3 readVec3(const json& j, const char* key, glm::vec3 fallback)
 //   "EMISSIVE": [r,g,b] and "EMISSIVE_STRENGTH" to glow and still scatter.
 //   Glass absorption: "ABSORPTION": [r,g,b] per unit length, or
 //   "ATTENUATION_COLOR" + "ATTENUATION_DISTANCE" (glTF KHR_materials_volume).
+static int procedurals(const std::string& name)
+{
+    if (name == "checker") return PROCEDURAL_CHECKER;
+    if (name == "marble") return PROCEDURAL_MARBLE;
+    if (name == "wood") return PROCEDURAL_WOOD;
+    if (name == "noise") return PROCEDURAL_NOISE;
+    cout << "Unknown procedural texture " << name << endl;
+    return PROCEDURAL_NONE;
+}
+
+// Texture related material fields:
+//   "TEXTURE": base color image, "NORMAL_MAP": tangent space normal map,
+//   "UV_SCALE": [su, sv] tiling,
+//   "PROCEDURAL": { "TYPE": checker|marble|wood|noise, "COLOR2": [...], "SCALE": s },
+//   "BUMP": { "STRENGTH": a, "SCALE": s }  procedural bump mapping
+static void parseTextures(Scene& scene, Material& m, const json& p)
+{
+    if (p.contains("TEXTURE"))
+    {
+        m.baseColorTex = scene.loadTextureFile(p["TEXTURE"]);
+    }
+    if (p.contains("NORMAL_MAP"))
+    {
+        m.normalTex = scene.loadTextureFile(p["NORMAL_MAP"]);
+    }
+    m.normalScale = p.value("NORMAL_SCALE", 1.0f);
+    if (p.contains("UV_SCALE"))
+    {
+        const auto& s = p["UV_SCALE"];
+        m.uvScale = s.is_number() ? glm::vec2(s.get<float>()) : glm::vec2(s[0], s[1]);
+    }
+    if (p.contains("PROCEDURAL"))
+    {
+        const auto& proc = p["PROCEDURAL"];
+        m.procedural = procedurals(proc.value("TYPE", std::string("checker")));
+        m.procColor2 = readVec3(proc, "COLOR2", glm::vec3(0.1f));
+        m.procScale = proc.value("SCALE", 1.0f);
+    }
+    if (p.contains("BUMP"))
+    {
+        const auto& bump = p["BUMP"];
+        m.bumpStrength = bump.value("STRENGTH", 0.1f);
+        m.bumpScale = bump.value("SCALE", 1.0f);
+    }
+}
+
 static Material parseMaterial(const std::string& name, const json& p)
 {
-    Material m{};
+    Material m = makeDefaultMaterial();
     m.color = readVec3(p, "RGB", glm::vec3(1.0f));
     m.roughness = glm::clamp(p.value("ROUGHNESS", 0.0f), 0.0f, 1.0f);
     m.metallic = glm::clamp(p.value("METALLIC", 0.0f), 0.0f, 1.0f);
@@ -107,6 +155,39 @@ int Scene::addMaterial(const Material& m)
 {
     materials.push_back(m);
     return (int)materials.size() - 1;
+}
+
+int Scene::addTexture(TextureData&& texture)
+{
+    textures.push_back(std::move(texture));
+    return (int)textures.size() - 1;
+}
+
+int Scene::loadTextureFile(const std::string& file)
+{
+    std::string path = sceneDir + file;
+    auto cached = textureCache.find(path);
+    if (cached != textureCache.end())
+    {
+        return cached->second;
+    }
+    int w, h, comp;
+    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &comp, 4);
+    if (!pixels)
+    {
+        cout << "Couldn't load texture " << path << ": " << stbi_failure_reason() << endl;
+        return -1;
+    }
+    TextureData tex;
+    tex.width = w;
+    tex.height = h;
+    tex.rgba.assign(pixels, pixels + (size_t)w * h * 4);
+    tex.name = file;
+    stbi_image_free(pixels);
+    cout << "Loaded texture " << path << " (" << w << "x" << h << ")" << endl;
+    int id = addTexture(std::move(tex));
+    textureCache[path] = id;
+    return id;
 }
 
 int Scene::addMesh(const MeshData& mesh)
@@ -252,7 +333,9 @@ void Scene::loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bv
         const auto& p = item.value();
         // TODO: handle materials loading differently
         MatNameToID[name] = materials.size();
-        materials.emplace_back(parseMaterial(name, p));
+        Material m = parseMaterial(name, p);
+        parseTextures(*this, m, p);
+        materials.emplace_back(m);
     }
 
     if (data.contains("BVH"))
@@ -268,10 +351,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bv
     }
 
     // Fallback material for meshes whose primitives do not specify one.
-    Material defaultMat{};
-    defaultMat.type = MATERIAL_DIFFUSE;
-    defaultMat.color = glm::vec3(0.8f);
-    defaultMat.ior = 1.5f;
+    Material defaultMat = makeDefaultMaterial();
     int defaultMaterial = -1;
 
     const auto& objectsData = data["Objects"];

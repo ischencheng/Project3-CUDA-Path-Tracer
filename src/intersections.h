@@ -443,6 +443,7 @@ __device__ inline SurfaceHit computeSurfaceHit(const SceneView& scene, const Ray
         glm::vec3 n = b0 * scene.normals[tri.v[0]] + b1 * scene.normals[tri.v[1]] + b2 * scene.normals[tri.v[2]];
         objectShadingNormal = glm::dot(n, n) > 1e-12f ? n : objectNormal;
         hit.uv = b0 * scene.uvs[tri.v[0]] + b1 * scene.uvs[tri.v[1]] + b2 * scene.uvs[tri.v[2]];
+        hit.objectPosition = v0 + b1 * e1 + b2 * e2;
         glm::vec4 t0 = scene.tangents[tri.v[0]];
         glm::vec4 t = b0 * t0 + b1 * scene.tangents[tri.v[1]] + b2 * scene.tangents[tri.v[2]];
         objectTangent = glm::vec3(t);
@@ -452,6 +453,7 @@ __device__ inline SurfaceHit computeSurfaceHit(const SceneView& scene, const Ray
     {
         Ray q = toObjectSpace(geom, ray);
         glm::vec3 p = q.origin + isect.t * q.direction;
+        hit.objectPosition = p;
         if (geom.type == CUBE)
         {
             // Each face gets the [0,1]^2 square spanned by the other two axes.

@@ -22,6 +22,9 @@ public:
     void setResolution(int width, int height);
 
     int addMaterial(const Material& m);
+    int addTexture(TextureData&& texture);
+    // Loads an image file (relative to the scene file) once; -1 on failure.
+    int loadTextureFile(const std::string& file);
     // Builds the BVH of `mesh`, appends it to the global geometry arrays and
     // returns its mesh id.
     int addMesh(const MeshData& mesh);
@@ -43,5 +46,7 @@ public:
     std::vector<glm::vec2> vertexUVs;
     std::vector<glm::vec4> vertexTangents;
     std::unordered_map<std::string, int> meshCache;    // file path -> mesh id
+    std::vector<TextureData> textures;
+    std::unordered_map<std::string, int> textureCache; // file path -> texture id
     double totalBvhBuildMs = 0.0;
 };

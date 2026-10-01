@@ -116,6 +116,16 @@ enum MaterialType
     MATERIAL_TYPE_COUNT
 };
 
+enum ProceduralType
+{
+    PROCEDURAL_NONE = 0,
+    PROCEDURAL_CHECKER,     // UV checkerboard
+    PROCEDURAL_MARBLE,      // turbulence-distorted veins (object space)
+    PROCEDURAL_WOOD,        // noisy rings around the object's y axis
+    PROCEDURAL_NOISE,       // fractal gradient noise
+    PROCEDURAL_TYPE_COUNT
+};
+
 struct Material
 {
     int type;
@@ -125,6 +135,51 @@ struct Material
     float metallic;
     float ior;
     glm::vec3 absorption;   // Beer-Lambert absorption coefficient inside dielectrics
+
+    // Textures (indices into the scene texture list, -1 if unused). Base
+    // color and emissive textures are sRGB encoded; the others are linear.
+    int baseColorTex;
+    int metallicRoughnessTex;   // glTF: roughness in G, metalness in B
+    int normalTex;              // tangent space normal map
+    int emissiveTex;
+    float normalScale;
+    glm::vec2 uvScale;          // tiling of the image textures
+
+    // Procedural texture blending `color` towards procColor2.
+    int procedural;             // ProceduralType
+    glm::vec3 procColor2;
+    float procScale;
+    // Procedural bump mapping (0 strength disables it).
+    float bumpStrength;
+    float bumpScale;
+};
+
+// Material with every optional feature disabled.
+inline Material makeDefaultMaterial()
+{
+    Material m{};
+    m.type = MATERIAL_DIFFUSE;
+    m.color = glm::vec3(0.8f);
+    m.ior = 1.5f;
+    m.baseColorTex = -1;
+    m.metallicRoughnessTex = -1;
+    m.normalTex = -1;
+    m.emissiveTex = -1;
+    m.normalScale = 1.0f;
+    m.uvScale = glm::vec2(1.0f);
+    m.procedural = PROCEDURAL_NONE;
+    m.procScale = 1.0f;
+    m.bumpScale = 1.0f;
+    return m;
+}
+
+// CPU copy of an 8-bit RGBA texture.
+struct TextureData
+{
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> rgba;
+    std::string name;
 };
 
 struct Camera
@@ -185,6 +240,7 @@ struct ShadeableIntersection
 struct SurfaceHit
 {
     glm::vec3 position;
+    glm::vec3 objectPosition;   // hit point in object space (solid textures)
     glm::vec3 normal;           // geometric normal, facing the incoming ray
     glm::vec3 shadingNormal;    // interpolated normal, same side as `normal`
     glm::vec3 tangent;          // world-space tangent (for normal mapping), may be zero
@@ -206,6 +262,7 @@ struct SceneView
     const glm::vec3* normals;
     const glm::vec2* uvs;
     const glm::vec4* tangents;
+    const cudaTextureObject_t* textures;
     int useBVH;         // 0: test every triangle of a mesh
     int cullBounds;     // test each object's world AABB before its geometry
 };

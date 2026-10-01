@@ -20,6 +20,7 @@
 #include "postprocess.h"
 #include "sampler.h"
 #include "mathUtils.h"
+#include "textures.h"
 
 // Synchronizing after every kernel makes errors easy to attribute but
 // serializes the CPU and the GPU, so only do it in debug builds.
@@ -105,6 +106,10 @@ static Triangle* dev_triangles = NULL;
 static glm::vec3* dev_vertexNormals = NULL;
 static glm::vec2* dev_vertexUVs = NULL;
 static glm::vec4* dev_vertexTangents = NULL;
+// Textures: one CUDA array + texture object per scene texture
+static std::vector<cudaArray_t> textureArrays;
+static std::vector<cudaTextureObject_t> textureObjects;
+static cudaTextureObject_t* dev_textures = NULL;
 static void* dev_cubScratch = NULL;
 static size_t cubScratchBytes = 0;
 static int sortKeyBits = 1;
@@ -146,6 +151,52 @@ static void uploadVector(T*& dev, const std::vector<T>& host)
     }
 }
 
+// Uploads RGBA8 textures into CUDA arrays and creates bilinear, wrapping
+// texture objects returning normalized floats.
+static void uploadTextures(const std::vector<TextureData>& textures)
+{
+    for (const TextureData& tex : textures)
+    {
+        cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
+        cudaArray_t array;
+        cudaMallocArray(&array, &desc, tex.width, tex.height);
+        cudaMemcpy2DToArray(array, 0, 0, tex.rgba.data(), tex.width * 4, tex.width * 4, tex.height,
+            cudaMemcpyHostToDevice);
+
+        cudaResourceDesc resDesc = {};
+        resDesc.resType = cudaResourceTypeArray;
+        resDesc.res.array.array = array;
+        cudaTextureDesc texDesc = {};
+        texDesc.addressMode[0] = cudaAddressModeWrap;
+        texDesc.addressMode[1] = cudaAddressModeWrap;
+        texDesc.filterMode = cudaFilterModeLinear;
+        texDesc.readMode = cudaReadModeNormalizedFloat;
+        texDesc.normalizedCoords = 1;
+        cudaTextureObject_t object = 0;
+        cudaCreateTextureObject(&object, &resDesc, &texDesc, NULL);
+
+        textureArrays.push_back(array);
+        textureObjects.push_back(object);
+    }
+    uploadVector(dev_textures, textureObjects);
+}
+
+static void freeTextures()
+{
+    for (cudaTextureObject_t t : textureObjects)
+    {
+        cudaDestroyTextureObject(t);
+    }
+    for (cudaArray_t a : textureArrays)
+    {
+        cudaFreeArray(a);
+    }
+    textureObjects.clear();
+    textureArrays.clear();
+    cudaFree(dev_textures);
+    dev_textures = NULL;
+}
+
 static SceneView makeSceneView(const RenderSettings& settings)
 {
     SceneView view;
@@ -159,6 +210,7 @@ static SceneView makeSceneView(const RenderSettings& settings)
     view.normals = dev_vertexNormals;
     view.uvs = dev_vertexUVs;
     view.tangents = dev_vertexTangents;
+    view.textures = dev_textures;
     view.useBVH = settings.useBVH ? 1 : 0;
     view.cullBounds = settings.cullBounds ? 1 : 0;
     return view;
@@ -193,6 +245,7 @@ void pathtraceInit(Scene* scene)
     uploadVector(dev_vertexNormals, scene->vertexNormals);
     uploadVector(dev_vertexUVs, scene->vertexUVs);
     uploadVector(dev_vertexTangents, scene->vertexTangents);
+    uploadTextures(scene->textures);
 
     cudaMalloc(&dev_pathsAlt, pixelcount * sizeof(PathSegment));
     cudaMalloc(&dev_intersectionsAlt, pixelcount * sizeof(ShadeableIntersection));
@@ -252,6 +305,7 @@ void pathtraceFree()
     cudaFree(dev_vertexNormals);
     cudaFree(dev_vertexUVs);
     cudaFree(dev_vertexTangents);
+    freeTextures();
     dev_meshes = NULL;
     dev_bvhNodes = NULL;
     dev_triGeoms = NULL;
@@ -492,28 +546,29 @@ __global__ void shadeMaterial(
     const Material material = params.scene.materials[intersection.materialId];
     SurfaceHit hit = computeSurfaceHit(params.scene, path.ray, intersection);
 
-    if (material.emission.x > 0.0f || material.emission.y > 0.0f || material.emission.z > 0.0f)
-    {
-        addToImage(params.image, path.pixelIndex, path.throughput * material.emission);
-    }
     if (material.type == MATERIAL_EMITTING)
     {
+        addToImage(params.image, path.pixelIndex, path.throughput * material.emission);
         pathSegments[idx].remainingBounces = 0;
         return;
     }
 
     SampleContext sampler = makeSampleContext(path.pixelIndex, params.iter, params.settings.samplerType);
-    BSDFParams bsdf;
-    bsdf.type = material.type;
-    bsdf.color = material.color;
-    bsdf.alpha = roughnessToAlpha(material.roughness);
-    bsdf.metallic = material.metallic;
-    bsdf.etap = hit.frontFace ? material.ior : 1.0f / material.ior;
     glm::vec3 wo = -path.ray.direction;
     // Interpolated normals can face away from the viewer at silhouettes; fall
     // back to the geometric normal there.
-    glm::vec3 shadingNormal = glm::dot(wo, hit.shadingNormal) > 0.0f ? hit.shadingNormal : hit.normal;
-    Frame frame = makeFrame(shadingNormal);
+    if (glm::dot(wo, hit.shadingNormal) <= 0.0f)
+    {
+        hit.shadingNormal = hit.normal;
+    }
+    MaterialEval mat = evaluateMaterial(material, hit, params.scene.textures, wo);
+    const BSDFParams& bsdf = mat.bsdf;
+    Frame frame = makeFrame(mat.shadingNormal);
+
+    if (mat.emission.x > 0.0f || mat.emission.y > 0.0f || mat.emission.z > 0.0f)
+    {
+        addToImage(params.image, path.pixelIndex, path.throughput * mat.emission);
+    }
 
     BSDFSample bs;
     float uLobe = sample1D(sampler, bounceDimension(depth, BDIM_LOBE));
