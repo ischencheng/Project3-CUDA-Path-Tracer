@@ -26,13 +26,30 @@ enum ToneMapMode
     TONEMAP_COUNT
 };
 
+enum CompactionMode
+{
+    COMPACT_OFF = 0,        // keep dead paths in place, kernels skip them
+    COMPACT_THRUST,         // thrust::remove_if in place
+    COMPACT_CUB,            // cub::DeviceSelect into a second buffer, preallocated scratch
+    COMPACT_MODE_COUNT
+};
+
+enum SortMode
+{
+    SORT_OFF = 0,
+    SORT_THRUST,            // thrust::sort_by_key moving the full structs
+    SORT_CUB,               // cub radix sort of (material, index) + gather kernel
+    SORT_CUB_INDIRECT,      // cub radix sort of (material, index), shade through the index
+    SORT_MODE_COUNT
+};
+
 // Settings that the renderer reads every iteration. Most of them are exposed
 // through ImGui and the command line so that features can be toggled for
 // performance comparisons.
 struct RenderSettings
 {
-    bool sortByMaterial = false;
-    bool streamCompaction = true;
+    int sortMode = SORT_OFF;
+    int compactionMode = COMPACT_CUB;
     bool antialiasing = true;
 
     // display / output

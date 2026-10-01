@@ -293,8 +293,10 @@ void RenderImGui()
 
     if (ImGui::CollapsingHeader("Integrator", ImGuiTreeNodeFlags_DefaultOpen))
     {
-        resetNeeded |= ImGui::Checkbox("Stream compaction", &settings.streamCompaction);
-        resetNeeded |= ImGui::Checkbox("Sort paths by material", &settings.sortByMaterial);
+        const char* compactModes[COMPACT_MODE_COUNT] = { "Off", "thrust::remove_if", "CUB select (ping-pong)" };
+        const char* sortModes[SORT_MODE_COUNT] = { "Off", "thrust::sort_by_key", "CUB radix + gather", "CUB radix, indirect" };
+        resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
+        resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
         resetNeeded |= ImGui::SliderInt("Max depth", &renderState->traceDepth, 1, MAX_TRACKED_DEPTH);
     }
@@ -404,8 +406,8 @@ static void printUsage(const char* exe)
     printf("  --warmup N          iterations excluded from timing statistics\n");
     printf("  --profile           collect per-stage timings and alive-path counts\n");
     printf("  --stats FILE        append timing statistics as CSV to FILE\n");
-    printf("  --sort 0|1          sort paths by material before shading\n");
-    printf("  --compact 0|1       stream compact terminated paths\n");
+    printf("  --sort off|thrust|cub       sort paths by material before shading\n");
+    printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
     printf("  --tonemap linear|reinhard|aces, --gamma 0|1, --exposure F\n");
 }
@@ -432,8 +434,18 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--warmup") options.warmup = std::stoi(next());
         else if (arg == "--profile") stats.profileStages = true;
         else if (arg == "--stats") options.statsFile = next();
-        else if (arg == "--sort") settings.sortByMaterial = parseBool(next());
-        else if (arg == "--compact") settings.streamCompaction = parseBool(next());
+        else if (arg == "--sort")
+        {
+            std::string v = next();
+            settings.sortMode = v == "thrust" ? SORT_THRUST : v == "indirect" ? SORT_CUB_INDIRECT
+                : (v == "cub" || parseBool(v)) ? SORT_CUB : SORT_OFF;
+        }
+        else if (arg == "--compact")
+        {
+            std::string v = next();
+            settings.compactionMode = v == "thrust" ? COMPACT_THRUST
+                : (v == "cub" || parseBool(v)) ? COMPACT_CUB : COMPACT_OFF;
+        }
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
         else if (arg == "--gamma") settings.gammaCorrect = parseBool(next());
         else if (arg == "--exposure") settings.exposure = std::stof(next());
@@ -483,7 +495,7 @@ static void writeStats(const char* sceneFile)
     }
     std::ofstream out(options.statsFile, std::ios::app);
     out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
-        << "," << s.streamCompaction << "," << s.sortByMaterial << "," << s.antialiasing
+        << "," << s.compactionMode << "," << s.sortMode << "," << s.antialiasing
         << "," << stats.avgIterationMs();
     for (int st = 0; st < STAGE_COUNT; ++st)
     {

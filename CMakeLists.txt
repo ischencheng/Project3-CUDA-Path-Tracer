@@ -55,6 +55,7 @@ set(headers
     src/glslUtility.hpp
     src/pathtrace.h
     src/postprocess.h
+    src/sampler.h
     src/scene.h
     src/sceneStructs.h
     src/utilities.h
@@ -66,8 +67,6 @@ set(sources
     src/image.cpp
     src/glslUtility.cpp
     src/pathtrace.cu
-    src/intersections.cu
-    src/interactions.cu
     src/scene.cpp
     src/utilities.cpp
 )

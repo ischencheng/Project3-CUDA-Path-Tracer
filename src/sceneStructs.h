@@ -74,7 +74,6 @@ struct PathSegment
 {
     Ray ray;
     glm::vec3 throughput;   // product of BSDF * cos / pdf along the path so far
-    glm::vec3 radiance;     // radiance gathered by this path so far
     int pixelIndex;
     int remainingBounces;   // <= 0 means the path is terminated
 };
@@ -82,9 +81,19 @@ struct PathSegment
 // Use with a corresponding PathSegment to do:
 // 1) color contribution computation
 // 2) BSDF evaluation: generate a new ray
+// Only the data needed to identify the hit is stored here; the shading kernel
+// reconstructs the surface attributes, which keeps this struct cheap to sort.
 struct ShadeableIntersection
 {
-  float t;
-  glm::vec3 surfaceNormal;  // always faces the incoming ray
-  int materialId;
+    float t;            // world-space distance along the (unit) ray, < 0 for a miss
+    int materialId;
+    int geomId;
+};
+
+// Surface attributes reconstructed for shading.
+struct SurfaceHit
+{
+    glm::vec3 position;
+    glm::vec3 normal;       // geometric normal, facing the incoming ray
+    bool frontFace;         // true if the ray hit the outside of the surface
 };
