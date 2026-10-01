@@ -71,6 +71,7 @@ struct CommandLineOptions
     std::string output;         // overrides FILE from the scene file
     std::string statsFile;      // appends a CSV line of timing statistics
     bool savePfm = false;       // also write the raw linear average as .pfm
+    bool saveFeatures = false;  // also write the albedo/normal denoiser features
     bool bvhOverride = false;   // BVH build settings given on the command line
     BVHBuildSettings bvh;
 };
@@ -333,8 +334,21 @@ void RenderImGui()
         resetNeeded |= ImGui::SliderFloat("Focal distance", &cam.focalDistance, 0.1f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
     }
 
+    if (ImGui::CollapsingHeader("Denoiser", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Text("Open Image Denoise: %s", pathtraceDenoiserName());
+        ImGui::Checkbox("Denoise", &settings.denoise);
+        ImGui::SliderInt("Every N iterations", &settings.denoiseInterval, 1, 256);
+        ImGui::Checkbox("Albedo + normal guides", &settings.denoiseAux);
+        ImGui::Checkbox("Prefilter guides", &settings.denoisePrefilter);
+        ImGui::Checkbox("High quality", &settings.denoiseHighQuality);
+        ImGui::Text("Last denoise: %.2f ms", stats.lastDenoiseMs);
+    }
+
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen))
     {
+        const char* displayModes[DISPLAY_MODE_COUNT] = { "Render", "Albedo feature", "Normal feature" };
+        ImGui::Combo("Show", &settings.displayMode, displayModes, DISPLAY_MODE_COUNT);
         const char* toneMaps[TONEMAP_COUNT] = { "Linear clamp", "Reinhard", "ACES" };
         ImGui::Combo("Tone map", &settings.toneMap, toneMaps, TONEMAP_COUNT);
         ImGui::Checkbox("Gamma 2.2", &settings.gammaCorrect);
@@ -439,6 +453,10 @@ static void printUsage(const char* exe)
     printf("  --warmup N          iterations excluded from timing statistics\n");
     printf("  --profile           collect per-stage timings and alive-path counts\n");
     printf("  --stats FILE        append timing statistics as CSV to FILE\n");
+    printf("  --pfm               also save the raw linear radiance as a .pfm file\n");
+    printf("  --denoise 0|1       run Open Image Denoise on the final image (saved as *.denoised.png)\n");
+    printf("  --denoise-aux 0|1, --denoise-prefilter 0|1   denoiser feature options\n");
+    printf("  --save-features     also save the albedo and normal feature images\n");
     printf("  --sort off|thrust|cub       sort paths by material before shading\n");
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
@@ -483,6 +501,10 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--profile") stats.profileStages = true;
         else if (arg == "--stats") options.statsFile = next();
         else if (arg == "--pfm") options.savePfm = true;
+        else if (arg == "--denoise") settings.denoise = parseBool(next());
+        else if (arg == "--denoise-aux") settings.denoiseAux = parseBool(next());
+        else if (arg == "--denoise-prefilter") settings.denoisePrefilter = parseBool(next());
+        else if (arg == "--save-features") options.saveFeatures = true;
         else if (arg == "--sort")
         {
             std::string v = next();
@@ -711,6 +733,48 @@ void saveImage()
     if (options.savePfm)
     {
         raw.savePFM(filename);
+    }
+
+    if (guiData->settings.denoise && pathtraceDenoise(iteration))
+    {
+        std::vector<glm::vec3> denoised;
+        pathtraceCopyDenoisedToHost(denoised);
+        Image dn(width, height);
+        Image dnRaw(options.savePfm ? width : 1, options.savePfm ? height : 1);
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                glm::vec3 pix = denoised[x + y * width];
+                dn.setPixel(width - 1 - x, y, displayTransform(pix, guiData->settings));
+                if (options.savePfm)
+                {
+                    dnRaw.setPixel(width - 1 - x, y, pix);
+                }
+            }
+        }
+        dn.savePNG(filename + ".denoised");
+        if (options.savePfm)
+        {
+            dnRaw.savePFM(filename + ".denoised");
+        }
+        printf("Denoised in %.2f ms (%s)\n", guiData->stats.lastDenoiseMs, pathtraceDenoiserName());
+    }
+    if (options.saveFeatures)
+    {
+        std::vector<glm::vec3> albedo, normal;
+        pathtraceCopyFeaturesToHost(iteration, albedo, normal);
+        Image a(width, height), n(width, height);
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                a.setPixel(width - 1 - x, y, albedo[x + y * width]);
+                n.setPixel(width - 1 - x, y, normal[x + y * width] * 0.5f + glm::vec3(0.5f));
+            }
+        }
+        a.savePNG(filename + ".albedo");
+        n.savePNG(filename + ".normal");
     }
     //img.saveHDR(filename);  // Save a Radiance HDR file
 }

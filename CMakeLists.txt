@@ -50,6 +50,7 @@ include_directories(${GLM_INCLUDE_DIRS})
 
 set(headers
     src/bvh.h
+    src/denoiser.h
     src/image.h
     src/meshLoader.h
     src/interactions.h
@@ -68,6 +69,7 @@ set(headers
 
 set(sources
     src/bvh.cpp
+    src/denoiser.cpp
     src/main.cpp
     src/meshLoader.cpp
     src/stb.cpp
@@ -131,4 +133,24 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT $
 # makes nvcc fail with an unhelpful exit code, so use a build-local temp dir.
 if(MSVC)
     set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/cuda-temp.props")
+endif()
+
+# Optional Intel Open Image Denoise. Unpack the prebuilt package (for example
+# oidn-2.5.1.x64.windows.zip) into external/oidn or point OIDN_ROOT at it.
+set(OIDN_ROOT "${CMAKE_SOURCE_DIR}/external/oidn" CACHE PATH "Open Image Denoise package root")
+find_library(OIDN_LIBRARY NAMES OpenImageDenoise PATHS "${OIDN_ROOT}/lib" NO_DEFAULT_PATH)
+if(OIDN_LIBRARY AND EXISTS "${OIDN_ROOT}/include/OpenImageDenoise/oidn.h")
+    message(STATUS "Open Image Denoise found: ${OIDN_ROOT}")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE USE_OIDN)
+    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${OIDN_ROOT}/include")
+    target_link_libraries(${CMAKE_PROJECT_NAME} ${OIDN_LIBRARY})
+    if(WIN32)
+        # copy the runtime DLLs (core, CPU and CUDA devices, TBB) next to the executable
+        file(GLOB OIDN_DLLS "${OIDN_ROOT}/bin/OpenImageDenoise*.dll" "${OIDN_ROOT}/bin/tbb12.dll")
+        list(FILTER OIDN_DLLS EXCLUDE REGEX "device_(hip|sycl)")
+        add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OIDN_DLLS} $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>)
+    endif()
+else()
+    message(STATUS "Open Image Denoise not found in ${OIDN_ROOT}: denoising disabled")
 endif()

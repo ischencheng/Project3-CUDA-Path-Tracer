@@ -61,10 +61,26 @@ struct RenderSettings
     bool useBVH = true;             // traverse mesh BVHs (otherwise test every triangle)
     bool cullBounds = true;         // test object bounding boxes first
 
+    // Open Image Denoise
+    bool denoise = false;
+    int denoiseInterval = 32;       // interactive mode: denoise every N iterations
+    bool denoiseAux = true;         // guide the denoiser with albedo + normal
+    bool denoisePrefilter = true;   // denoise the auxiliary features first
+    bool denoiseHighQuality = true;
+
     // display / output
+    int displayMode = 0;            // DisplayMode
     int toneMap = TONEMAP_NONE;
     bool gammaCorrect = false;
     float exposure = 1.0f;
+};
+
+enum DisplayMode
+{
+    DISPLAY_RENDER = 0,     // the render (denoised if denoising is enabled)
+    DISPLAY_ALBEDO,         // first-hit albedo feature
+    DISPLAY_NORMAL,         // first-hit normal feature
+    DISPLAY_MODE_COUNT
 };
 
 enum RenderStage
@@ -88,6 +104,7 @@ struct RenderStats
     int iterationsSeen = 0;
     int sampledIterations = 0;
     float lastIterationMs = 0.0f;
+    float lastDenoiseMs = 0.0f;
     double totalIterationMs = 0.0;
     double stageMs[STAGE_COUNT] = {};
     // number of paths still alive at the start of each bounce

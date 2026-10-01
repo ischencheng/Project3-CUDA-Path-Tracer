@@ -22,6 +22,7 @@
 #include "mathUtils.h"
 #include "textures.h"
 #include "lights.h"
+#include "denoiser.h"
 
 // Synchronizing after every kernel makes errors easy to attribute but
 // serializes the CPU and the GPU, so only do it in debug builds.
@@ -57,8 +58,11 @@ void checkCUDAErrorFn(const char* msg, const char* file, int line)
 }
 
 //Kernel that writes the image to the OpenGL PBO directly.
-__global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm::vec3* image,
-    RenderSettings settings)
+// `scale` converts the stored value into average radiance (1 / iterations
+// for accumulation buffers, 1 for the denoised image). Feature buffers are
+// shown without tone mapping.
+__global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, float scale, const glm::vec3* image,
+    RenderSettings settings, bool rawDisplay)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -66,7 +70,15 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
     if (x < resolution.x && y < resolution.y)
     {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = displayTransform(image[index] / (float)iter, settings);
+        glm::vec3 pix = image[index] * scale;
+        if (rawDisplay)
+        {
+            pix = glm::clamp(pix, glm::vec3(0.0f), glm::vec3(1.0f));
+        }
+        else
+        {
+            pix = displayTransform(pix, settings);
+        }
 
         glm::ivec3 color;
         color.x = glm::clamp((int)(pix.x * 255.0), 0, 255);
@@ -78,6 +90,18 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
         pbo[index].x = color.x;
         pbo[index].y = color.y;
         pbo[index].z = color.z;
+    }
+}
+
+__global__ void showNormals(uchar4* pbo, glm::ivec2 resolution, float scale, const glm::vec3* normals)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    if (x < resolution.x && y < resolution.y)
+    {
+        int index = x + (y * resolution.x);
+        glm::vec3 c = glm::clamp(normals[index] * scale * 0.5f + glm::vec3(0.5f), glm::vec3(0.0f), glm::vec3(1.0f));
+        pbo[index] = make_uchar4((unsigned char)(c.x * 255.0f), (unsigned char)(c.y * 255.0f), (unsigned char)(c.z * 255.0f), 0);
     }
 }
 
@@ -116,6 +140,15 @@ static Light* dev_lights = NULL;
 static float* dev_lightCdf = NULL;
 static int* dev_triLightIndex = NULL;
 static ShadowRay* dev_shadowRays = NULL;
+// Denoiser: accumulated first-hit features and the averaged inputs/output
+static glm::vec3* dev_albedo = NULL;
+static glm::vec3* dev_normal = NULL;
+static glm::vec3* dev_dnColor = NULL;
+static glm::vec3* dev_dnAlbedo = NULL;
+static glm::vec3* dev_dnNormal = NULL;
+static glm::vec3* dev_denoised = NULL;
+static bool denoiserReady = false;
+static bool denoisedValid = false;
 static cudaArray_t envArray = NULL;
 static cudaTextureObject_t envTexture = 0;
 static float* dev_envFunc = NULL;
@@ -333,6 +366,22 @@ void pathtraceInit(Scene* scene)
     }
     cudaMalloc(&dev_shadowRays, pixelcount * sizeof(ShadowRay));
 
+    cudaMalloc(&dev_albedo, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_normal, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_dnColor, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_dnAlbedo, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_dnNormal, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_denoised, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_albedo, 0, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_normal, 0, pixelcount * sizeof(glm::vec3));
+    denoiserReady = denoiserInit(cam.resolution.x, cam.resolution.y, (float*)dev_dnColor,
+        (float*)dev_dnAlbedo, (float*)dev_dnNormal, (float*)dev_denoised);
+    denoisedValid = false;
+    if (denoiserReady)
+    {
+        printf("Open Image Denoise ready (%s device)\n", denoiserDeviceName().c_str());
+    }
+
     cudaMalloc(&dev_pathsAlt, pixelcount * sizeof(PathSegment));
     cudaMalloc(&dev_intersectionsAlt, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_sortKeys, pixelcount * sizeof(int));
@@ -396,6 +445,15 @@ void pathtraceFree()
     cudaFree(dev_lightCdf);
     cudaFree(dev_triLightIndex);
     cudaFree(dev_shadowRays);
+    denoiserFree();
+    denoiserReady = false;
+    cudaFree(dev_albedo);
+    cudaFree(dev_normal);
+    cudaFree(dev_dnColor);
+    cudaFree(dev_dnAlbedo);
+    cudaFree(dev_dnNormal);
+    cudaFree(dev_denoised);
+    dev_albedo = dev_normal = dev_dnColor = dev_dnAlbedo = dev_dnNormal = dev_denoised = NULL;
     dev_lights = NULL;
     dev_lightCdf = NULL;
     dev_triLightIndex = NULL;
@@ -433,6 +491,9 @@ void pathtraceResetImage()
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_albedo, 0, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_normal, 0, pixelcount * sizeof(glm::vec3));
+    denoisedValid = false;
     if (guiData != NULL)
     {
         guiData->stats.reset();
@@ -593,7 +654,22 @@ struct ShadeParams
     LightsView lights;
     EnvironmentView env;
     glm::vec3* image;
+    glm::vec3* aovAlbedo;   // first-hit features for the denoiser
+    glm::vec3* aovNormal;
 };
+
+// Records the denoiser features once per path, at the first surface that is
+// not a perfect mirror/glass (those show the next surface instead).
+__device__ inline void recordFeatures(const ShadeParams& p, PathSegment& path, glm::vec3 albedo, glm::vec3 normal)
+{
+    if (path.flags & PATH_FLAG_AOV_DONE)
+    {
+        return;
+    }
+    p.aovAlbedo[path.pixelIndex] += glm::clamp(albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+    p.aovNormal[path.pixelIndex] += normal;
+    path.flags |= PATH_FLAG_AOV_DONE;
+}
 
 // Whether next event estimation can contribute for these BSDF parameters.
 __device__ inline bool hasNonDeltaLobe(const BSDFParams& p)
@@ -676,8 +752,11 @@ __global__ void shadeMaterial(
             float lightPdf = params.lights.envSelectProb > 0.0f
                 ? params.lights.envSelectProb * environmentPdf(params.env, dir) : 0.0f;
             float w = bsdfHitWeight(params, path, lightPdf);
-            addToImage(params.image, path.pixelIndex, path.throughput * environmentRadiance(params.env, dir) * w);
+            glm::vec3 radiance = environmentRadiance(params.env, dir);
+            addToImage(params.image, path.pixelIndex, path.throughput * radiance * w);
+            recordFeatures(params, path, radiance, glm::vec3(0.0f));
         }
+        recordFeatures(params, path, glm::vec3(0.0f), glm::vec3(0.0f));
         pathSegments[idx].remainingBounces = 0;
         return;
     }
@@ -718,8 +797,13 @@ __global__ void shadeMaterial(
     }
     if (material.type == MATERIAL_EMITTING)
     {
+        recordFeatures(params, path, mat.emission, hit.normal);
         pathSegments[idx].remainingBounces = 0;
         return;
+    }
+    if (hasNonDeltaLobe(mat.bsdf) || depth >= 2)
+    {
+        recordFeatures(params, path, mat.albedo, mat.shadingNormal);
     }
 
     SampleContext sampler = makeSampleContext(path.pixelIndex, params.iter, params.settings.samplerType);
@@ -800,7 +884,7 @@ __global__ void shadeMaterial(
     {
         path.throughput *= bs.weight;
         path.lastPdf = bs.pdf;
-        path.flags = bs.isDelta ? PATH_FLAG_DELTA_BOUNCE : 0;
+        path.flags = (path.flags & PATH_FLAG_AOV_DONE) | (bs.isDelta ? PATH_FLAG_DELTA_BOUNCE : 0);
         if (bs.isTransmission)
         {
             path.mediumMaterial = hit.frontFace ? intersection.materialId : -1;
@@ -1057,6 +1141,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeParams.lights = makeLightsView();
         shadeParams.env = makeEnvironmentView();
         shadeParams.image = dev_image;
+        shadeParams.aovAlbedo = dev_albedo;
+        shadeParams.aovNormal = dev_normal;
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             shadeParams,
             num_paths,
@@ -1108,11 +1194,104 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     }
     stats.iterationsSeen++;
 
+    denoisedValid = false;
+    if (settings.denoise && denoiserReady && pbo != NULL
+        && (iter % std::max(1, settings.denoiseInterval) == 0 || iter == (int)hst_scene->state.iterations))
+    {
+        pathtraceDenoise(iter);
+    }
+
     // Send results to OpenGL buffer for rendering
     if (pbo != NULL)
     {
-        sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image, settings);
+        const glm::vec3* source = dev_image;
+        float scale = 1.0f / iter;
+        bool raw = false;
+        if (settings.displayMode == DISPLAY_ALBEDO || settings.displayMode == DISPLAY_NORMAL)
+        {
+            source = settings.displayMode == DISPLAY_ALBEDO ? dev_albedo : dev_normal;
+            raw = true;
+        }
+        else if (settings.denoise && denoisedValid)
+        {
+            source = dev_denoised;
+            scale = 1.0f;
+        }
+        if (settings.displayMode == DISPLAY_NORMAL)
+        {
+            // map [-1, 1] to [0, 1] for viewing
+            showNormals<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, 1.0f / iter, dev_normal);
+        }
+        else
+        {
+            sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, scale, source, settings, raw);
+        }
     }
 
     checkCUDAError("pathtrace");
+}
+
+// Averages the accumulation buffers into the denoiser inputs.
+__global__ void prepareDenoiserInputs(int n, float scale, const glm::vec3* image, const glm::vec3* albedo,
+    const glm::vec3* normal, glm::vec3* outColor, glm::vec3* outAlbedo, glm::vec3* outNormal)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        outColor[i] = image[i] * scale;
+        outAlbedo[i] = albedo[i] * scale;
+        outNormal[i] = normal[i] * scale;
+    }
+}
+
+bool pathtraceDenoise(int iter)
+{
+    if (!denoiserReady || iter <= 0)
+    {
+        return false;
+    }
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    const RenderSettings& settings = guiData->settings;
+    cudaEventRecord(stageStartEvent);
+    const int blockSize = 256;
+    prepareDenoiserInputs<<<(pixelcount + blockSize - 1) / blockSize, blockSize>>>(pixelcount, 1.0f / iter,
+        dev_image, dev_albedo, dev_normal, dev_dnColor, dev_dnAlbedo, dev_dnNormal);
+    checkCUDAError("prepare denoiser inputs");
+    bool ok = denoiserRun(settings.denoiseAux, settings.denoisePrefilter, settings.denoiseHighQuality);
+    cudaEventRecord(stageStopEvent);
+    cudaEventSynchronize(stageStopEvent);
+    cudaEventElapsedTime(&guiData->stats.lastDenoiseMs, stageStartEvent, stageStopEvent);
+    denoisedValid = ok;
+    return ok;
+}
+
+void pathtraceCopyDenoisedToHost(std::vector<glm::vec3>& out)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    out.resize(pixelcount);
+    cudaMemcpy(out.data(), dev_denoised, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+}
+
+void pathtraceCopyFeaturesToHost(int iter, std::vector<glm::vec3>& albedo, std::vector<glm::vec3>& normal)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    albedo.resize(pixelcount);
+    normal.resize(pixelcount);
+    cudaMemcpy(albedo.data(), dev_albedo, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(normal.data(), dev_normal, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < pixelcount; i++)
+    {
+        albedo[i] /= (float)iter;
+        normal[i] /= (float)iter;
+    }
+}
+
+const char* pathtraceDenoiserName()
+{
+    static std::string name;
+    name = denoiserDeviceName();
+    return name.c_str();
 }

@@ -226,6 +226,7 @@ struct EnvironmentMap
 enum PathFlags
 {
     PATH_FLAG_DELTA_BOUNCE = 1,     // the last scattering event was a delta lobe
+    PATH_FLAG_AOV_DONE = 2,         // denoiser features were recorded for this path
 };
 
 struct PathSegment
