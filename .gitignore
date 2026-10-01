@@ -557,3 +557,11 @@ xcuserdata
 *.xccheckout
 *.moved-aside
 *.xcuserstate
+
+### Project-local ###
+# render outputs, saved render states and the optional OIDN binaries
+renders/
+*.ptstate
+external/oidn/
+nvcc-temp/
+__pycache__/

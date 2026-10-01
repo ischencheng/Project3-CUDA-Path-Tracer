@@ -33,18 +33,20 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
+enum MaterialType
+{
+    MATERIAL_DIFFUSE = 0,
+    MATERIAL_SPECULAR,
+    MATERIAL_EMITTING,
+    MATERIAL_TYPE_COUNT
+};
+
 struct Material
 {
+    int type;
     glm::vec3 color;
-    struct
-    {
-        float exponent;
-        glm::vec3 color;
-    } specular;
-    float hasReflective;
-    float hasRefractive;
-    float indexOfRefraction;
     float emittance;
+    float roughness;
 };
 
 struct Camera
@@ -71,9 +73,10 @@ struct RenderState
 struct PathSegment
 {
     Ray ray;
-    glm::vec3 color;
+    glm::vec3 throughput;   // product of BSDF * cos / pdf along the path so far
+    glm::vec3 radiance;     // radiance gathered by this path so far
     int pixelIndex;
-    int remainingBounces;
+    int remainingBounces;   // <= 0 means the path is terminated
 };
 
 // Use with a corresponding PathSegment to do:
@@ -82,6 +85,6 @@ struct PathSegment
 struct ShadeableIntersection
 {
   float t;
-  glm::vec3 surfaceNormal;
+  glm::vec3 surfaceNormal;  // always faces the incoming ray
   int materialId;
 };

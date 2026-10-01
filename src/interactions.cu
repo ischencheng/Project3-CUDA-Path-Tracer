@@ -54,4 +54,22 @@ __host__ __device__ void scatterRay(
     // TODO: implement this.
     // A basic implementation of pure-diffuse shading will just call the
     // calculateRandomDirectionInHemisphere defined above.
+    glm::vec3 newDirection;
+    if (m.type == MATERIAL_SPECULAR)
+    {
+        // Perfect mirror: the BSDF is a delta distribution, so f * cos / pdf
+        // reduces to the specular tint.
+        newDirection = glm::reflect(pathSegment.ray.direction, normal);
+    }
+    else
+    {
+        // Ideal diffuse: f = albedo / pi and the cosine-weighted pdf is
+        // cos / pi, so f * cos / pdf reduces to the albedo.
+        newDirection = calculateRandomDirectionInHemisphere(normal, rng);
+    }
+
+    pathSegment.throughput *= m.color;
+    pathSegment.ray.origin = intersect + normal * RAY_EPSILON;
+    pathSegment.ray.direction = glm::normalize(newDirection);
+    pathSegment.remainingBounces--;
 }

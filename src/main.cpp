@@ -1,6 +1,7 @@
 #include "glslUtility.hpp"
 #include "image.h"
 #include "pathtrace.h"
+#include "postprocess.h"
 #include "scene.h"
 #include "sceneStructs.h"
 #include "utilities.h"
@@ -59,8 +60,21 @@ GuiDataContainer* imguiData = NULL;
 ImGuiIO* io = nullptr;
 bool mouseOverImGuiWinow = false;
 
+// Command line options
+struct CommandLineOptions
+{
+    bool headless = false;
+    int spp = -1;               // overrides ITERATIONS from the scene file
+    int depth = -1;             // overrides DEPTH from the scene file
+    int warmup = 0;             // iterations excluded from timing statistics
+    std::string output;         // overrides FILE from the scene file
+    std::string statsFile;      // appends a CSV line of timing statistics
+};
+static CommandLineOptions options;
+
 // Forward declarations for window loop and interactivity
 void runCuda();
+void saveImage();
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
@@ -232,7 +246,7 @@ bool init()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     io = &ImGui::GetIO(); (void)io;
-    ImGui::StyleColorsLight();
+    ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 120");
 
@@ -254,8 +268,10 @@ void InitImguiData(GuiDataContainer* guiData)
     imguiData = guiData;
 }
 
+static const char* stageNames[STAGE_COUNT] = {
+    "Generate", "Intersect", "Sort", "Shade", "Compact", "Gather"
+};
 
-// LOOK: Un-Comment to check ImGui Usage
 void RenderImGui()
 {
     mouseOverImGuiWinow = io->WantCaptureMouse;
@@ -264,30 +280,65 @@ void RenderImGui()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    bool show_demo_window = true;
-    bool show_another_window = false;
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-    static float f = 0.0f;
-    static int counter = 0;
+    RenderSettings& settings = imguiData->settings;
+    RenderStats& stats = imguiData->stats;
+    bool resetNeeded = false;
 
-    ImGui::Begin("Path Tracer Analytics");                  // Create a window called "Hello, world!" and append into it.
-    
-    // LOOK: Un-Comment to check the output window and usage
-    //ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-    //ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-    //ImGui::Checkbox("Another Window", &show_another_window);
+    ImGui::Begin("Path Tracer Analytics");
 
-    //ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-    //ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-    //if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-    //    counter++;
-    //ImGui::SameLine();
-    //ImGui::Text("counter = %d", counter);
+    ImGui::Text("Iteration %d / %d", iteration, renderState->iterations);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+    ImGui::Text("Path tracing: %.2f ms/iter (avg %.2f ms)", stats.lastIterationMs, stats.avgIterationMs());
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
+    if (ImGui::CollapsingHeader("Integrator", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        resetNeeded |= ImGui::Checkbox("Stream compaction", &settings.streamCompaction);
+        resetNeeded |= ImGui::Checkbox("Sort paths by material", &settings.sortByMaterial);
+        resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
+        resetNeeded |= ImGui::SliderInt("Max depth", &renderState->traceDepth, 1, MAX_TRACKED_DEPTH);
+    }
+
+    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        const char* toneMaps[TONEMAP_COUNT] = { "Linear clamp", "Reinhard", "ACES" };
+        ImGui::Combo("Tone map", &settings.toneMap, toneMaps, TONEMAP_COUNT);
+        ImGui::Checkbox("Gamma 2.2", &settings.gammaCorrect);
+        ImGui::SliderFloat("Exposure", &settings.exposure, 0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::Button("Save image (S)"))
+        {
+            saveImage();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Profiling"))
+    {
+        if (ImGui::Checkbox("Per-stage timing (adds syncs)", &stats.profileStages))
+        {
+            resetNeeded = true;
+        }
+        if (stats.profileStages && stats.sampledIterations > 0)
+        {
+            for (int s = 0; s < STAGE_COUNT; ++s)
+            {
+                ImGui::Text("%-10s %8.3f ms", stageNames[s], stats.stageMs[s] / stats.sampledIterations);
+            }
+            float alive[MAX_TRACKED_DEPTH];
+            for (int d = 0; d < stats.numBounces; ++d)
+            {
+                alive[d] = (float)(stats.alivePaths[d] / stats.sampledIterations);
+            }
+            ImGui::PlotHistogram("Alive paths", alive, stats.numBounces, 0, NULL, 0.0f,
+                (float)(width * height), ImVec2(0, 80));
+        }
+    }
+
     ImGui::End();
 
+    if (resetNeeded)
+    {
+        camchanged = true;  // restarts accumulation
+    }
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -338,63 +389,214 @@ void mainLoop()
 //-------------MAIN--------------
 //-------------------------------
 
+static bool parseBool(const std::string& v)
+{
+    return v == "1" || v == "true" || v == "on" || v == "yes";
+}
+
+static void printUsage(const char* exe)
+{
+    printf("Usage: %s SCENEFILE.json [options]\n", exe);
+    printf("  --headless          render without a window, save the image and exit\n");
+    printf("  --spp N             number of iterations (overrides ITERATIONS)\n");
+    printf("  --depth N           maximum path depth (overrides DEPTH)\n");
+    printf("  --out NAME          output file prefix (overrides FILE)\n");
+    printf("  --warmup N          iterations excluded from timing statistics\n");
+    printf("  --profile           collect per-stage timings and alive-path counts\n");
+    printf("  --stats FILE        append timing statistics as CSV to FILE\n");
+    printf("  --sort 0|1          sort paths by material before shading\n");
+    printf("  --compact 0|1       stream compact terminated paths\n");
+    printf("  --aa 0|1            stochastic sampled antialiasing\n");
+    printf("  --tonemap linear|reinhard|aces, --gamma 0|1, --exposure F\n");
+}
+
+// Returns false if the program should exit.
+static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, RenderStats& stats)
+{
+    for (int i = 2; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        auto next = [&](void) -> std::string {
+            if (i + 1 >= argc)
+            {
+                printf("Missing value for %s\n", arg.c_str());
+                exit(EXIT_FAILURE);
+            }
+            return argv[++i];
+        };
+
+        if (arg == "--headless") options.headless = true;
+        else if (arg == "--spp") options.spp = std::stoi(next());
+        else if (arg == "--depth") options.depth = std::stoi(next());
+        else if (arg == "--out") options.output = next();
+        else if (arg == "--warmup") options.warmup = std::stoi(next());
+        else if (arg == "--profile") stats.profileStages = true;
+        else if (arg == "--stats") options.statsFile = next();
+        else if (arg == "--sort") settings.sortByMaterial = parseBool(next());
+        else if (arg == "--compact") settings.streamCompaction = parseBool(next());
+        else if (arg == "--aa") settings.antialiasing = parseBool(next());
+        else if (arg == "--gamma") settings.gammaCorrect = parseBool(next());
+        else if (arg == "--exposure") settings.exposure = std::stof(next());
+        else if (arg == "--tonemap")
+        {
+            std::string v = next();
+            settings.toneMap = v == "aces" ? TONEMAP_ACES : v == "reinhard" ? TONEMAP_REINHARD : TONEMAP_NONE;
+        }
+        else if (arg == "--help" || arg == "-h")
+        {
+            printUsage(argv[0]);
+            return false;
+        }
+        else
+        {
+            printf("Unknown option %s\n", arg.c_str());
+            printUsage(argv[0]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static void writeStats(const char* sceneFile)
+{
+    const RenderStats& stats = guiData->stats;
+    const RenderSettings& s = guiData->settings;
+    printf("Rendered %d iterations, %.3f ms/iteration (averaged over %d after %d warmup)\n",
+        iteration, stats.avgIterationMs(), stats.sampledIterations, stats.warmupIterations);
+    if (stats.profileStages && stats.sampledIterations > 0)
+    {
+        for (int st = 0; st < STAGE_COUNT; ++st)
+        {
+            printf("  %-10s %8.3f ms\n", stageNames[st], stats.stageMs[st] / stats.sampledIterations);
+        }
+        printf("  alive paths per bounce:");
+        for (int d = 0; d < stats.numBounces; ++d)
+        {
+            printf(" %.0f", stats.alivePaths[d] / stats.sampledIterations);
+        }
+        printf("\n");
+    }
+
+    if (options.statsFile.empty())
+    {
+        return;
+    }
+    std::ofstream out(options.statsFile, std::ios::app);
+    out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
+        << "," << s.streamCompaction << "," << s.sortByMaterial << "," << s.antialiasing
+        << "," << stats.avgIterationMs();
+    for (int st = 0; st < STAGE_COUNT; ++st)
+    {
+        out << "," << (stats.sampledIterations ? stats.stageMs[st] / stats.sampledIterations : 0.0);
+    }
+    out << ",\"";
+    for (int d = 0; d < stats.numBounces; ++d)
+    {
+        out << (d ? " " : "") << (stats.sampledIterations ? stats.alivePaths[d] / stats.sampledIterations : 0.0);
+    }
+    out << "\"\n";
+}
+
+// Recomputes the camera basis from the orbit parameters (zoom, theta, phi)
+// around the current look-at point.
+static void updateCamera()
+{
+    Camera& cam = renderState->camera;
+    cameraPosition.x = zoom * sin(phi) * sin(theta);
+    cameraPosition.y = zoom * cos(theta);
+    cameraPosition.z = zoom * cos(phi) * sin(theta);
+
+    cam.view = -glm::normalize(cameraPosition);
+    glm::vec3 v = cam.view;
+    glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
+    glm::vec3 r = glm::normalize(glm::cross(v, u));
+    cam.up = glm::normalize(glm::cross(r, v));
+    cam.right = r;
+
+    cameraPosition += cam.lookAt;
+    cam.position = cameraPosition;
+}
+
 int main(int argc, char** argv)
 {
     startTimeString = currentTimeString();
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        printUsage(argv[0]);
         return 1;
     }
 
     const char* sceneFile = argv[1];
 
-    // Load scene file
-    scene = new Scene(sceneFile);
-
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();
+    if (!parseCommandLine(argc, argv, guiData->settings, guiData->stats))
+    {
+        return 0;
+    }
+    guiData->stats.warmupIterations = options.warmup;
+
+    // Load scene file
+    scene = new Scene(sceneFile);
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;
     renderState = &scene->state;
+    if (options.spp > 0) renderState->iterations = options.spp;
+    if (options.depth > 0) renderState->traceDepth = options.depth;
+    if (!options.output.empty()) renderState->imageName = options.output;
     Camera& cam = renderState->camera;
     width = cam.resolution.x;
     height = cam.resolution.y;
 
-    glm::vec3 view = cam.view;
-    glm::vec3 up = cam.up;
-    glm::vec3 right = glm::cross(view, up);
-    up = glm::cross(right, view);
-
-    cameraPosition = cam.position;
-
-    // compute phi (horizontal) and theta (vertical) relative 3D axis
-    // so, (0 0 1) is forward, (0 1 0) is up
-    glm::vec3 viewXZ = glm::vec3(view.x, 0.0f, view.z);
-    glm::vec3 viewZY = glm::vec3(0.0f, view.y, view.z);
-    phi = glm::acos(glm::dot(glm::normalize(viewXZ), glm::vec3(0, 0, -1)));
-    theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
+    // compute the orbit parameters of the camera around the look-at point:
+    // theta is measured from +Y, phi around +Y starting at +Z
     ogLookAt = cam.lookAt;
-    zoom = glm::length(cam.position - ogLookAt);
+    glm::vec3 offset = cam.position - cam.lookAt;
+    zoom = glm::length(offset);
+    theta = glm::acos(glm::clamp(offset.y / zoom, -1.0f, 1.0f));
+    phi = glm::atan(offset.x, offset.z);
+
+    InitImguiData(guiData);
+    InitDataContainer(guiData);
+
+    if (options.headless)
+    {
+        updateCamera();
+        pathtraceInit(scene);
+        pathtraceResetImage();
+        for (iteration = 1; iteration <= (int)renderState->iterations; ++iteration)
+        {
+            pathtrace(NULL, 0, iteration);
+        }
+        iteration = renderState->iterations;
+        saveImage();
+        writeStats(sceneFile);
+        pathtraceFree();
+        return 0;
+    }
 
     // Initialize CUDA and GL components
     init();
-
-    // Initialize ImGui Data
-    InitImguiData(guiData);
-    InitDataContainer(guiData);
+    pathtraceInit(scene);
 
     // GLFW main loop
     mainLoop();
 
+    pathtraceFree();
     return 0;
 }
 
 void saveImage()
 {
+    if (iteration <= 0)
+    {
+        return;
+    }
     float samples = iteration;
+    pathtraceCopyImageToHost();
+
     // output image file
     Image img(width, height);
 
@@ -404,13 +606,21 @@ void saveImage()
         {
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            img.setPixel(width - 1 - x, y, displayTransform(glm::vec3(pix) / samples, guiData->settings));
         }
     }
 
     std::string filename = renderState->imageName;
     std::ostringstream ss;
-    ss << filename << "." << startTimeString << "." << samples << "samp";
+    if (options.headless)
+    {
+        // deterministic names make scripted comparisons easier
+        ss << filename << "." << samples << "samp";
+    }
+    else
+    {
+        ss << filename << "." << startTimeString << "." << samples << "samp";
+    }
     filename = ss.str();
 
     // CHECKITOUT
@@ -423,21 +633,7 @@ void runCuda()
     if (camchanged)
     {
         iteration = 0;
-        Camera& cam = renderState->camera;
-        cameraPosition.x = zoom * sin(phi) * sin(theta);
-        cameraPosition.y = zoom * cos(theta);
-        cameraPosition.z = zoom * cos(phi) * sin(theta);
-
-        cam.view = -glm::normalize(cameraPosition);
-        glm::vec3 v = cam.view;
-        glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
-        glm::vec3 r = glm::cross(v, u);
-        cam.up = glm::cross(r, v);
-        cam.right = r;
-
-        cam.position = cameraPosition;
-        cameraPosition += cam.lookAt;
-        cam.position = cameraPosition;
+        updateCamera();
         camchanged = false;
     }
 
@@ -446,8 +642,9 @@ void runCuda()
 
     if (iteration == 0)
     {
-        pathtraceFree();
-        pathtraceInit(scene);
+        // Only the accumulation buffer needs to be cleared; the scene data on
+        // the GPU stays valid when the camera moves.
+        pathtraceResetImage();
     }
 
     if (iteration < renderState->iterations)

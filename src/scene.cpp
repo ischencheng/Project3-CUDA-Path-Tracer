@@ -43,21 +43,26 @@ void Scene::loadFromJSON(const std::string& jsonName)
         const auto& p = item.value();
         Material newMaterial{};
         // TODO: handle materials loading differently
+        const auto& col = p["RGB"];
+        newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+        newMaterial.roughness = p.value("ROUGHNESS", 0.0f);
         if (p["TYPE"] == "Diffuse")
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.type = MATERIAL_DIFFUSE;
         }
         else if (p["TYPE"] == "Emitting")
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.type = MATERIAL_EMITTING;
             newMaterial.emittance = p["EMITTANCE"];
         }
         else if (p["TYPE"] == "Specular")
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.type = MATERIAL_SPECULAR;
+        }
+        else
+        {
+            cout << "Unknown material type " << p["TYPE"] << " for " << name << ", using Diffuse" << endl;
+            newMaterial.type = MATERIAL_DIFFUSE;
         }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
@@ -111,11 +116,12 @@ void Scene::loadFromJSON(const std::string& jsonName)
     float fovx = (atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
 
+    // The view direction has to be known before the right vector is derived.
+    camera.view = glm::normalize(camera.lookAt - camera.position);
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
+    camera.up = glm::normalize(glm::cross(camera.right, camera.view));
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
-
-    camera.view = glm::normalize(camera.lookAt - camera.position);
 
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;

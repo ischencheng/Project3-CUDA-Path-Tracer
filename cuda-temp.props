@@ -1,0 +1,12 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <CudaTempDir>$(MSBuildProjectDirectory)\nvcc-temp</CudaTempDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <BuildMacro Include="TEMP"><Value>$(CudaTempDir)</Value><EnvironmentVariable>true</EnvironmentVariable></BuildMacro>
+    <BuildMacro Include="TMP"><Value>$(CudaTempDir)</Value><EnvironmentVariable>true</EnvironmentVariable></BuildMacro>
+  </ItemGroup>
+  <Target Name="CreateCudaTempDirectory" BeforeTargets="SetUserMacroEnvironmentVariables">
+    <MakeDir Directories="$(CudaTempDir)" />
+  </Target>
+</Project>

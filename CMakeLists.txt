@@ -54,6 +54,7 @@ set(headers
     src/intersections.h
     src/glslUtility.hpp
     src/pathtrace.h
+    src/postprocess.h
     src/scene.h
     src/sceneStructs.h
     src/utilities.h
@@ -119,3 +120,9 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
 
+
+# Visual Studio passes TEMP/TMP to nvcc; a user profile path containing spaces
+# makes nvcc fail with an unhelpful exit code, so use a build-local temp dir.
+if(MSVC)
+    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES VS_USER_PROPS "${CMAKE_CURRENT_SOURCE_DIR}/cuda-temp.props")
+endif()
