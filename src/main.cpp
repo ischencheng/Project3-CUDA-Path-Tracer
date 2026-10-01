@@ -66,10 +66,13 @@ struct CommandLineOptions
     bool headless = false;
     int spp = -1;               // overrides ITERATIONS from the scene file
     int depth = -1;             // overrides DEPTH from the scene file
+    int resX = -1, resY = -1;   // overrides RES from the scene file
     int warmup = 0;             // iterations excluded from timing statistics
     std::string output;         // overrides FILE from the scene file
     std::string statsFile;      // appends a CSV line of timing statistics
     bool savePfm = false;       // also write the raw linear average as .pfm
+    bool bvhOverride = false;   // BVH build settings given on the command line
+    BVHBuildSettings bvh;
 };
 static CommandLineOptions options;
 
@@ -307,6 +310,14 @@ void RenderImGui()
         resetNeeded |= ImGui::SliderInt("Max depth", &renderState->traceDepth, 1, MAX_TRACKED_DEPTH);
     }
 
+    if (ImGui::CollapsingHeader("Acceleration", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Text("%zu triangles, %zu meshes, %zu BVH nodes", scene->triangles.size(),
+            scene->meshes.size(), scene->bvhNodes.size());
+        resetNeeded |= ImGui::Checkbox("Mesh BVH", &settings.useBVH);
+        resetNeeded |= ImGui::Checkbox("Bounding box culling", &settings.cullBounds);
+    }
+
     if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
     {
         Camera& cam = renderState->camera;
@@ -415,6 +426,7 @@ static void printUsage(const char* exe)
     printf("  --headless          render without a window, save the image and exit\n");
     printf("  --spp N             number of iterations (overrides ITERATIONS)\n");
     printf("  --depth N           maximum path depth (overrides DEPTH)\n");
+    printf("  --res WxH           image resolution (overrides RES)\n");
     printf("  --out NAME          output file prefix (overrides FILE)\n");
     printf("  --warmup N          iterations excluded from timing statistics\n");
     printf("  --profile           collect per-stage timings and alive-path counts\n");
@@ -423,6 +435,9 @@ static void printUsage(const char* exe)
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
+    printf("  --bvh 0|1           traverse mesh BVHs (0 = test every triangle)\n");
+    printf("  --cull 0|1          test object bounding boxes before their geometry\n");
+    printf("  --bvh-leaf N, --bvh-depth N, --bvh-bins N   BVH build parameters\n");
     printf("  --tonemap linear|reinhard|aces, --gamma 0|1, --exposure F\n");
 }
 
@@ -444,6 +459,13 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         if (arg == "--headless") options.headless = true;
         else if (arg == "--spp") options.spp = std::stoi(next());
         else if (arg == "--depth") options.depth = std::stoi(next());
+        else if (arg == "--res")
+        {
+            std::string v = next();
+            size_t x = v.find('x');
+            options.resX = std::stoi(v.substr(0, x));
+            options.resY = std::stoi(v.substr(x + 1));
+        }
         else if (arg == "--out") options.output = next();
         else if (arg == "--warmup") options.warmup = std::stoi(next());
         else if (arg == "--profile") stats.profileStages = true;
@@ -464,6 +486,11 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--rr-depth") settings.rrStartDepth = std::stoi(next());
+        else if (arg == "--bvh") settings.useBVH = parseBool(next());
+        else if (arg == "--cull") settings.cullBounds = parseBool(next());
+        else if (arg == "--bvh-leaf") { options.bvhOverride = true; options.bvh.maxLeafSize = std::stoi(next()); }
+        else if (arg == "--bvh-depth") { options.bvhOverride = true; options.bvh.maxDepth = std::stoi(next()); }
+        else if (arg == "--bvh-bins") { options.bvhOverride = true; options.bvh.numBins = std::stoi(next()); }
         else if (arg == "--gamma") settings.gammaCorrect = parseBool(next());
         else if (arg == "--exposure") settings.exposure = std::stof(next());
         else if (arg == "--tonemap")
@@ -513,6 +540,7 @@ static void writeStats(const char* sceneFile)
     std::ofstream out(options.statsFile, std::ios::app);
     out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
         << "," << s.compactionMode << "," << s.sortMode << "," << s.antialiasing
+        << "," << s.russianRoulette << "," << s.useBVH << "," << s.cullBounds
         << "," << stats.avgIterationMs();
     for (int st = 0; st < STAGE_COUNT; ++st)
     {
@@ -567,7 +595,11 @@ int main(int argc, char** argv)
     guiData->stats.warmupIterations = options.warmup;
 
     // Load scene file
-    scene = new Scene(sceneFile);
+    scene = new Scene(sceneFile, options.bvhOverride ? &options.bvh : nullptr);
+    if (options.resX > 0)
+    {
+        scene->setResolution(options.resX, options.resY);
+    }
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;

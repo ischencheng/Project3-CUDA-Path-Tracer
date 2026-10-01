@@ -1,5 +1,6 @@
 #include "scene.h"
 
+#include "meshLoader.h"
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -82,14 +83,17 @@ static Material parseMaterial(const std::string& name, const json& p)
     return m;
 }
 
-Scene::Scene(string filename)
+Scene::Scene(string filename, const BVHBuildSettings* bvhOverride)
 {
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
+    sceneFile = filename;
+    size_t slash = filename.find_last_of("/\\");
+    sceneDir = slash == string::npos ? string() : filename.substr(0, slash + 1);
     auto ext = filename.substr(filename.find_last_of('.'));
     if (ext == ".json")
     {
-        loadFromJSON(filename);
+        loadFromJSON(filename, bvhOverride);
         return;
     }
     else
@@ -99,7 +103,144 @@ Scene::Scene(string filename)
     }
 }
 
-void Scene::loadFromJSON(const std::string& jsonName)
+int Scene::addMaterial(const Material& m)
+{
+    materials.push_back(m);
+    return (int)materials.size() - 1;
+}
+
+int Scene::addMesh(const MeshData& mesh)
+{
+    const int triCount = (int)mesh.indices.size();
+    const int vertexOffset = (int)vertexNormals.size();
+
+    // Per-triangle bounds and centroids drive the SAH build.
+    std::vector<AABB> bounds(triCount);
+    std::vector<glm::vec3> centroids(triCount);
+    for (int i = 0; i < triCount; i++)
+    {
+        const glm::ivec3& t = mesh.indices[i];
+        AABB b = AABB::empty();
+        b.grow(mesh.positions[t.x]);
+        b.grow(mesh.positions[t.y]);
+        b.grow(mesh.positions[t.z]);
+        bounds[i] = b;
+        centroids[i] = (mesh.positions[t.x] + mesh.positions[t.y] + mesh.positions[t.z]) / 3.0f;
+    }
+
+    std::vector<BVHNode> nodes;
+    std::vector<int> order;
+    BVHBuildStats stats = buildBVH(bounds, centroids, bvhSettings, nodes, order);
+    totalBvhBuildMs += stats.buildMs;
+
+    MeshInfo info;
+    info.triOffset = (int)triangles.size();
+    info.triCount = triCount;
+    info.rootNode = (int)bvhNodes.size();
+    info.nodeCount = (int)nodes.size();
+    info.bounds = AABB::empty();
+    for (const glm::vec3& p : mesh.positions)
+    {
+        info.bounds.grow(p);
+    }
+
+    // Store triangles in BVH leaf order so leaves reference contiguous ranges.
+    for (int i = 0; i < triCount; i++)
+    {
+        const glm::ivec3& t = mesh.indices[order[i]];
+        glm::vec3 v0 = mesh.positions[t.x];
+        glm::vec3 e1 = mesh.positions[t.y] - v0;
+        glm::vec3 e2 = mesh.positions[t.z] - v0;
+        TriangleGeom g;
+        g.v0 = make_float4(v0.x, v0.y, v0.z, 0.0f);
+        g.e1 = make_float4(e1.x, e1.y, e1.z, 0.0f);
+        g.e2 = make_float4(e2.x, e2.y, e2.z, 0.0f);
+        triGeoms.push_back(g);
+        Triangle tri;
+        tri.v[0] = vertexOffset + t.x;
+        tri.v[1] = vertexOffset + t.y;
+        tri.v[2] = vertexOffset + t.z;
+        tri.materialId = mesh.materials[order[i]];
+        triangles.push_back(tri);
+    }
+    for (BVHNode n : nodes)
+    {
+        n.leftFirst += n.triCount > 0 ? info.triOffset : info.rootNode;
+        bvhNodes.push_back(n);
+    }
+
+    const size_t vertexCount = mesh.positions.size();
+    for (size_t i = 0; i < vertexCount; i++)
+    {
+        vertexNormals.push_back(i < mesh.normals.size() ? mesh.normals[i] : glm::vec3(0.0f));
+        vertexUVs.push_back(i < mesh.uvs.size() ? mesh.uvs[i] : glm::vec2(0.0f));
+        vertexTangents.push_back(i < mesh.tangents.size() ? mesh.tangents[i] : glm::vec4(0.0f));
+    }
+
+    cout << "  bounds (" << info.bounds.min.x << ", " << info.bounds.min.y << ", " << info.bounds.min.z << ") - ("
+         << info.bounds.max.x << ", " << info.bounds.max.y << ", " << info.bounds.max.z << ")" << endl;
+    cout << "  BVH: " << triCount << " triangles, " << stats.nodeCount << " nodes, " << stats.leafCount
+         << " leaves, depth " << stats.depth << ", largest leaf " << stats.maxLeafTriangles
+         << ", built in " << stats.buildMs << " ms" << endl;
+
+    meshes.push_back(info);
+    return (int)meshes.size() - 1;
+}
+
+int Scene::loadMesh(const std::string& file, int defaultMaterial)
+{
+    std::string path = sceneDir + file;
+    std::string key = path + "#" + std::to_string(defaultMaterial);
+    auto cached = meshCache.find(key);
+    if (cached != meshCache.end())
+    {
+        return cached->second;
+    }
+
+    MeshData mesh;
+    std::string ext = path.substr(path.find_last_of('.') + 1);
+    for (char& c : ext) c = (char)tolower(c);
+    cout << "Loading mesh " << path << endl;
+    bool ok = ext == "obj" ? loadOBJ(path, *this, defaultMaterial, mesh)
+        : loadGLTF(path, *this, defaultMaterial, mesh);
+    if (!ok)
+    {
+        cout << "Couldn't load mesh " << path << endl;
+        exit(-1);
+    }
+    int id = addMesh(mesh);
+    meshCache[key] = id;
+    return id;
+}
+
+// World-space bounds of the transformed object-space bounds.
+void Scene::computeWorldBounds(Geom& geom) const
+{
+    AABB local;
+    if (geom.type == MESH)
+    {
+        local = meshes[geom.meshId].bounds;
+    }
+    else
+    {
+        local.min = glm::vec3(-0.5f);
+        local.max = glm::vec3(0.5f);
+    }
+    AABB world = AABB::empty();
+    for (int c = 0; c < 8; c++)
+    {
+        glm::vec3 corner((c & 1) ? local.max.x : local.min.x,
+            (c & 2) ? local.max.y : local.min.y,
+            (c & 4) ? local.max.z : local.min.z);
+        world.grow(glm::vec3(geom.transform * glm::vec4(corner, 1.0f)));
+    }
+    // pad slightly so flat objects still have a usable box
+    world.min -= glm::vec3(1e-4f);
+    world.max += glm::vec3(1e-4f);
+    geom.worldBounds = world;
+}
+
+void Scene::loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bvhOverride)
 {
     std::ifstream f(jsonName);
     json data = json::parse(f);
@@ -113,32 +254,80 @@ void Scene::loadFromJSON(const std::string& jsonName)
         MatNameToID[name] = materials.size();
         materials.emplace_back(parseMaterial(name, p));
     }
+
+    if (data.contains("BVH"))
+    {
+        const auto& b = data["BVH"];
+        bvhSettings.maxLeafSize = b.value("MAX_LEAF_SIZE", bvhSettings.maxLeafSize);
+        bvhSettings.maxDepth = b.value("MAX_DEPTH", bvhSettings.maxDepth);
+        bvhSettings.numBins = b.value("BINS", bvhSettings.numBins);
+    }
+    if (bvhOverride != nullptr)
+    {
+        bvhSettings = *bvhOverride;    // command line wins over the scene file
+    }
+
+    // Fallback material for meshes whose primitives do not specify one.
+    Material defaultMat{};
+    defaultMat.type = MATERIAL_DIFFUSE;
+    defaultMat.color = glm::vec3(0.8f);
+    defaultMat.ior = 1.5f;
+    int defaultMaterial = -1;
+
     const auto& objectsData = data["Objects"];
     for (const auto& p : objectsData)
     {
         const auto& type = p["TYPE"];
-        Geom newGeom;
+        Geom newGeom{};
+        newGeom.meshId = -1;
+        newGeom.materialid = -1;
+        if (p.contains("MATERIAL"))
+        {
+            auto it = MatNameToID.find(p["MATERIAL"]);
+            if (it == MatNameToID.end())
+            {
+                cout << "Unknown material " << p["MATERIAL"] << endl;
+                exit(-1);
+            }
+            newGeom.materialid = it->second;
+        }
         if (type == "cube")
         {
             newGeom.type = CUBE;
+        }
+        else if (type == "mesh")
+        {
+            newGeom.type = MESH;
+            if (defaultMaterial < 0)
+            {
+                defaultMaterial = addMaterial(defaultMat);
+            }
+            newGeom.meshId = loadMesh(p["FILE"], defaultMaterial);
         }
         else
         {
             newGeom.type = SPHERE;
         }
-        newGeom.materialid = MatNameToID[p["MATERIAL"]];
-        const auto& trans = p["TRANS"];
-        const auto& rotat = p["ROTAT"];
-        const auto& scale = p["SCALE"];
-        newGeom.translation = glm::vec3(trans[0], trans[1], trans[2]);
-        newGeom.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
-        newGeom.scale = glm::vec3(scale[0], scale[1], scale[2]);
+        if (newGeom.type != MESH && newGeom.materialid < 0)
+        {
+            cout << "Object of type " << type << " needs a MATERIAL" << endl;
+            exit(-1);
+        }
+        newGeom.translation = readVec3(p, "TRANS", glm::vec3(0.0f));
+        newGeom.rotation = readVec3(p, "ROTAT", glm::vec3(0.0f));
+        newGeom.scale = readVec3(p, "SCALE", glm::vec3(1.0f));
         newGeom.transform = utilityCore::buildTransformationMatrix(
             newGeom.translation, newGeom.rotation, newGeom.scale);
         newGeom.inverseTransform = glm::inverse(newGeom.transform);
         newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
+        computeWorldBounds(newGeom);
 
         geoms.push_back(newGeom);
+    }
+    if (!triangles.empty())
+    {
+        cout << "Scene has " << triangles.size() << " triangles in " << meshes.size() << " meshes, "
+             << bvhNodes.size() << " BVH nodes (" << totalBvhBuildMs << " ms)" << endl;
     }
     const auto& cameraData = data["Camera"];
     Camera& camera = state.camera;
@@ -185,4 +374,15 @@ void Scene::loadFromJSON(const std::string& jsonName)
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
+}
+
+void Scene::setResolution(int width, int height)
+{
+    Camera& camera = state.camera;
+    float yscaled = 0.5f * camera.pixelLength.y * camera.resolution.y;
+    camera.resolution = glm::ivec2(width, height);
+    float xscaled = (yscaled * width) / height;
+    camera.fov.x = (atan(xscaled) * 180) / PI;
+    camera.pixelLength = glm::vec2(2 * xscaled / (float)width, 2 * yscaled / (float)height);
+    state.image.assign(width * height, glm::vec3(0.0f));
 }

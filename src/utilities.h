@@ -55,6 +55,8 @@ struct RenderSettings
     bool russianRoulette = true;
     int rrStartDepth = 3;           // first bounce at which roulette may terminate paths
     int samplerType = 0;            // SamplerType (sampler.h)
+    bool useBVH = true;             // traverse mesh BVHs (otherwise test every triangle)
+    bool cullBounds = true;         // test object bounding boxes first
 
     // display / output
     int toneMap = TONEMAP_NONE;

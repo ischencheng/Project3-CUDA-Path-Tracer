@@ -97,6 +97,14 @@ static int* dev_sortKeysAlt = NULL;
 static int* dev_sortIndices = NULL;
 static int* dev_sortIndicesAlt = NULL;
 static int* dev_numSelected = NULL;
+// Triangle meshes and their BVHs
+static MeshInfo* dev_meshes = NULL;
+static BVHNode* dev_bvhNodes = NULL;
+static TriangleGeom* dev_triGeoms = NULL;
+static Triangle* dev_triangles = NULL;
+static glm::vec3* dev_vertexNormals = NULL;
+static glm::vec2* dev_vertexUVs = NULL;
+static glm::vec4* dev_vertexTangents = NULL;
 static void* dev_cubScratch = NULL;
 static size_t cubScratchBytes = 0;
 static int sortKeyBits = 1;
@@ -127,6 +135,35 @@ void InitDataContainer(GuiDataContainer* imGuiData)
     guiData = imGuiData;
 }
 
+template <typename T>
+static void uploadVector(T*& dev, const std::vector<T>& host)
+{
+    dev = NULL;
+    if (!host.empty())
+    {
+        cudaMalloc(&dev, host.size() * sizeof(T));
+        cudaMemcpy(dev, host.data(), host.size() * sizeof(T), cudaMemcpyHostToDevice);
+    }
+}
+
+static SceneView makeSceneView(const RenderSettings& settings)
+{
+    SceneView view;
+    view.geoms = dev_geoms;
+    view.geomCount = (int)hst_scene->geoms.size();
+    view.materials = dev_materials;
+    view.meshes = dev_meshes;
+    view.bvhNodes = dev_bvhNodes;
+    view.triGeoms = dev_triGeoms;
+    view.triangles = dev_triangles;
+    view.normals = dev_vertexNormals;
+    view.uvs = dev_vertexUVs;
+    view.tangents = dev_vertexTangents;
+    view.useBVH = settings.useBVH ? 1 : 0;
+    view.cullBounds = settings.cullBounds ? 1 : 0;
+    return view;
+}
+
 void pathtraceInit(Scene* scene)
 {
     hst_scene = scene;
@@ -149,6 +186,14 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    uploadVector(dev_meshes, scene->meshes);
+    uploadVector(dev_bvhNodes, scene->bvhNodes);
+    uploadVector(dev_triGeoms, scene->triGeoms);
+    uploadVector(dev_triangles, scene->triangles);
+    uploadVector(dev_vertexNormals, scene->vertexNormals);
+    uploadVector(dev_vertexUVs, scene->vertexUVs);
+    uploadVector(dev_vertexTangents, scene->vertexTangents);
+
     cudaMalloc(&dev_pathsAlt, pixelcount * sizeof(PathSegment));
     cudaMalloc(&dev_intersectionsAlt, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_sortKeys, pixelcount * sizeof(int));
@@ -200,6 +245,20 @@ void pathtraceFree()
     cudaFree(dev_sortIndicesAlt);
     cudaFree(dev_numSelected);
     cudaFree(dev_cubScratch);
+    cudaFree(dev_meshes);
+    cudaFree(dev_bvhNodes);
+    cudaFree(dev_triGeoms);
+    cudaFree(dev_triangles);
+    cudaFree(dev_vertexNormals);
+    cudaFree(dev_vertexUVs);
+    cudaFree(dev_vertexTangents);
+    dev_meshes = NULL;
+    dev_bvhNodes = NULL;
+    dev_triGeoms = NULL;
+    dev_triangles = NULL;
+    dev_vertexNormals = NULL;
+    dev_vertexUVs = NULL;
+    dev_vertexTangents = NULL;
     dev_image = NULL;
     dev_paths = dev_pathsAlt = NULL;
     dev_geoms = NULL;
@@ -306,8 +365,7 @@ __global__ void computeIntersections(
     int depth,
     int num_paths,
     PathSegment* pathSegments,
-    Geom* geoms,
-    int geoms_size,
+    SceneView scene,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -322,11 +380,11 @@ __global__ void computeIntersections(
             isect.t = -1.0f;
             isect.materialId = -1;
             isect.geomId = -1;
+            isect.primId = -1;
         }
         else
         {
-            // naive parse through global geoms
-            intersectScene(geoms, geoms_size, pathSegment.ray, isect);
+            intersectScene(scene, pathSegment.ray, isect);
         }
         intersections[path_index] = isect;
     }
@@ -381,8 +439,7 @@ struct ShadeParams
     int depth;
     RenderSettings settings;
     glm::vec3 background;
-    const Geom* geoms;
-    const Material* materials;
+    SceneView scene;
     glm::vec3* image;
 };
 
@@ -419,7 +476,7 @@ __global__ void shadeMaterial(
     // Beer-Lambert absorption along the segment travelled inside a medium.
     if (path.mediumMaterial >= 0 && intersection.t > 0.0f)
     {
-        glm::vec3 sigma = params.materials[path.mediumMaterial].absorption;
+        glm::vec3 sigma = params.scene.materials[path.mediumMaterial].absorption;
         path.throughput *= glm::exp(-sigma * intersection.t);
     }
 
@@ -432,8 +489,8 @@ __global__ void shadeMaterial(
         return;
     }
 
-    const Material material = params.materials[intersection.materialId];
-    SurfaceHit hit = computeSurfaceHit(params.geoms, path.ray, intersection);
+    const Material material = params.scene.materials[intersection.materialId];
+    SurfaceHit hit = computeSurfaceHit(params.scene, path.ray, intersection);
 
     if (material.emission.x > 0.0f || material.emission.y > 0.0f || material.emission.z > 0.0f)
     {
@@ -452,14 +509,23 @@ __global__ void shadeMaterial(
     bsdf.alpha = roughnessToAlpha(material.roughness);
     bsdf.metallic = material.metallic;
     bsdf.etap = hit.frontFace ? material.ior : 1.0f / material.ior;
-    Frame frame = makeFrame(hit.normal);
     glm::vec3 wo = -path.ray.direction;
+    // Interpolated normals can face away from the viewer at silhouettes; fall
+    // back to the geometric normal there.
+    glm::vec3 shadingNormal = glm::dot(wo, hit.shadingNormal) > 0.0f ? hit.shadingNormal : hit.normal;
+    Frame frame = makeFrame(shadingNormal);
 
     BSDFSample bs;
     float uLobe = sample1D(sampler, bounceDimension(depth, BDIM_LOBE));
     glm::vec2 uDir = sample2D(sampler, bounceDimension(depth, BDIM_BSDF));
     bool scattered = sampleBSDF(bsdf, frame, wo, uLobe, uDir, bs)
         && maxComponent(bs.weight) > 0.0f && isFiniteVec(bs.weight);
+    // With shading normals a sampled direction can end up on the wrong side
+    // of the actual surface; such samples would leak light, so drop them.
+    if (scattered && ((glm::dot(bs.wi, hit.normal) > 0.0f) == bs.isTransmission))
+    {
+        scattered = false;
+    }
 
     path.remainingBounces--;
     if (!scattered)
@@ -644,6 +710,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     checkCUDAError("generate camera ray");
     stageEnd(profile, STAGE_GENERATE);
 
+    const SceneView sceneView = makeSceneView(settings);
     int depth = 0;
     PathSegment* dev_path_end = dev_paths + pixelcount;
     int num_paths = dev_path_end - dev_paths;
@@ -670,8 +737,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             depth,
             num_paths,
             dev_paths,
-            dev_geoms,
-            hst_scene->geoms.size(),
+            sceneView,
             dev_intersections
         );
         checkCUDAError("trace one bounce");
@@ -700,8 +766,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeParams.depth = depth;
         shadeParams.settings = settings;
         shadeParams.background = hst_scene->state.backgroundColor;
-        shadeParams.geoms = dev_geoms;
-        shadeParams.materials = dev_materials;
+        shadeParams.scene = sceneView;
         shadeParams.image = dev_image;
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             shadeParams,
