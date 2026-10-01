@@ -52,6 +52,7 @@ struct RenderSettings
     int sortMode = SORT_OFF;
     int compactionMode = COMPACT_CUB;
     bool antialiasing = true;
+    bool motionBlur = true;         // sample a shutter time per path
     bool russianRoulette = true;
     int rrStartDepth = 3;           // first bounce at which roulette may terminate paths
     int samplerType = 1;            // SamplerType (sampler.h), Sobol by default

@@ -133,13 +133,14 @@ __device__ inline glm::vec3 triangleEmission(const SceneView& scene, int prim, g
 // pdf (solid angle) of sampling the point on `light` seen from `ref` along
 // `dir` at distance `dist`, where the light surface normal there is `n`.
 __device__ inline float areaLightPdf(const SceneView& scene, const Light& light, glm::vec3 ref,
-    glm::vec3 dir, float dist, glm::vec3 n)
+    glm::vec3 dir, float dist, glm::vec3 n, float time)
 {
     if (light.type == LIGHT_SPHERE)
     {
         const Geom& g = scene.geoms[light.geomId];
         float r = 0.5f * g.scale.x;
-        float d2 = glm::dot(g.translation - ref, g.translation - ref);
+        glm::vec3 c = g.translation + g.motion * time;
+        float d2 = glm::dot(c - ref, c - ref);
         if (d2 <= r * r)
         {
             // inside the sphere: uniform area sampling
@@ -154,22 +155,23 @@ __device__ inline float areaLightPdf(const SceneView& scene, const Light& light,
 }
 
 __device__ inline bool sampleAreaLight(const SceneView& scene, const Light& light, glm::vec3 ref,
-    glm::vec2 u, LightSample& ls)
+    glm::vec2 u, float time, LightSample& ls)
 {
     glm::vec3 p;
     glm::vec3 n;
     glm::vec3 emission;
+    const glm::vec3 offset = scene.geoms[light.geomId].motion * time;
     if (light.type == LIGHT_TRIANGLE)
     {
         glm::vec2 b = uniformSampleTriangle(u);
-        p = light.v0 + b.x * light.e1 + b.y * light.e2;
+        p = light.v0 + offset + b.x * light.e1 + b.y * light.e2;
         n = glm::normalize(glm::cross(light.e1, light.e2));
         emission = triangleEmission(scene, light.primId, b);
     }
     else if (light.type == LIGHT_SPHERE)
     {
         const Geom& g = scene.geoms[light.geomId];
-        glm::vec3 c = g.translation;
+        glm::vec3 c = g.translation + offset;
         float r = 0.5f * g.scale.x;
         glm::vec3 toCenter = c - ref;
         float d2 = glm::dot(toCenter, toCenter);
@@ -223,7 +225,7 @@ __device__ inline bool sampleAreaLight(const SceneView& scene, const Light& ligh
         nl[axis] = sign;
         local[(axis + 1) % 3] = u.x - 0.5f;
         local[(axis + 2) % 3] = u.y - 0.5f;
-        p = glm::vec3(g.transform * glm::vec4(local, 1.0f));
+        p = glm::vec3(g.transform * glm::vec4(local, 1.0f)) + offset;
         n = glm::normalize(glm::vec3(g.invTranspose * glm::vec4(nl, 0.0f)));
     }
 

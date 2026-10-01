@@ -496,6 +496,9 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
             segment.ray.direction = glm::normalize(focusPoint - segment.ray.origin);
         }
 
+        // Motion blur: each path sees the scene at one random shutter time.
+        segment.ray.time = settings.motionBlur ? sample1D(sampler, DIM_TIME) : 0.0f;
+
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
         segment.mediumMaterial = -1;
@@ -707,7 +710,7 @@ __global__ void shadeMaterial(
             if (light.geomId == intersection.geomId)
             {
                 lightPdf = areaLightPdf(params.scene, light, path.ray.origin, path.ray.direction,
-                    intersection.t, hit.normal);
+                    intersection.t, hit.normal, path.ray.time);
             }
         }
         float w = bsdfHitWeight(params, path, lightPdf);
@@ -746,7 +749,7 @@ __global__ void shadeMaterial(
         {
             float u = (uSelect - pEnv) / (1.0f - pEnv);
             int li = selectLight(params.lights, u);
-            valid = sampleAreaLight(params.scene, params.lights.lights[li], hit.position, uLight, ls);
+            valid = sampleAreaLight(params.scene, params.lights.lights[li], hit.position, uLight, path.ray.time, ls);
         }
 
         if (valid && maxComponent(ls.radiance) > 0.0f)
@@ -768,6 +771,7 @@ __global__ void shadeMaterial(
                     sr.maxT = ls.distance == FLT_MAX ? FLT_MAX : ls.distance * (1.0f - 1e-3f) - RAY_EPSILON;
                     sr.contribution = contribution;
                     sr.pixelIndex = path.pixelIndex;
+                    sr.time = path.ray.time;
                     shadowRays[idx] = sr;
                 }
             }
@@ -847,6 +851,7 @@ __global__ void traceShadowRays(int num_paths, const ShadowRay* shadowRays, Scen
     Ray ray;
     ray.origin = sr.origin;
     ray.direction = sr.direction;
+    ray.time = sr.time;
     if (!occluded(scene, ray, sr.maxT))
     {
         addToImage(image, sr.pixelIndex, sr.contribution);

@@ -55,11 +55,14 @@ __host__ __device__ inline glm::vec3 toVec3(float4 v)
 // Transforms a world-space ray into the object space of `geom`. The direction
 // is deliberately NOT normalized: the ray parameter t is then identical in
 // world and object space, so hits from different objects compare directly.
+// Moving objects are translated by motion * time, which is the same as
+// moving the ray origin the opposite way.
 __host__ __device__ inline Ray toObjectSpace(const Geom& geom, const Ray& r)
 {
     Ray q;
-    q.origin = multiplyMV(geom.inverseTransform, glm::vec4(r.origin, 1.0f));
+    q.origin = multiplyMV(geom.inverseTransform, glm::vec4(r.origin - geom.motion * r.time, 1.0f));
     q.direction = multiplyMV(geom.inverseTransform, glm::vec4(r.direction, 0.0f));
+    q.time = r.time;
     return q;
 }
 
@@ -490,6 +493,7 @@ __device__ inline SurfaceHit computeSurfaceHit(const SceneView& scene, const Ray
 
     glm::mat3 normalXform(geom.invTranspose);
     glm::vec3 n = glm::normalize(normalXform * objectNormal);
+    // (translation-only motion leaves normals and tangents unchanged)
     glm::vec3 ns = glm::normalize(normalXform * objectShadingNormal);
     hit.frontFace = glm::dot(n, ray.direction) < 0.0f;
     hit.normal = hit.frontFace ? n : -n;

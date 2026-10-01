@@ -304,6 +304,7 @@ void RenderImGui()
         const char* samplers[] = { "Random (hashed)", "Sobol (Owen scrambled)" };
         resetNeeded |= ImGui::Combo("Sampler", &settings.samplerType, samplers, 2);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
+        resetNeeded |= ImGui::Checkbox("Motion blur", &settings.motionBlur);
         resetNeeded |= ImGui::Checkbox("Next event estimation", &settings.nextEventEstimation);
         if (settings.nextEventEstimation)
         {
@@ -441,6 +442,7 @@ static void printUsage(const char* exe)
     printf("  --sort off|thrust|cub       sort paths by material before shading\n");
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
+    printf("  --motion 0|1        motion blur (objects with MOTION move during the exposure)\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
     printf("  --nee 0|1           next event estimation (direct light sampling)\n");
     printf("  --sampler random|sobol  random numbers for all sample dimensions\n");
@@ -494,6 +496,7 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
                 : (v == "cub" || parseBool(v)) ? COMPACT_CUB : COMPACT_OFF;
         }
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
+        else if (arg == "--motion") settings.motionBlur = parseBool(next());
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
         else if (arg == "--sampler") settings.samplerType = next() == "random" ? 0 : 1;

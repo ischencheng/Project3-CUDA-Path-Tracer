@@ -508,6 +508,11 @@ void Scene::computeWorldBounds(Geom& geom) const
             (c & 4) ? local.max.z : local.min.z);
         world.grow(glm::vec3(geom.transform * glm::vec4(corner, 1.0f)));
     }
+    // the box has to contain the object over the whole shutter interval
+    AABB moved = world;
+    moved.min += geom.motion;
+    moved.max += geom.motion;
+    world.grow(moved);
     // pad slightly so flat objects still have a usable box
     world.min -= glm::vec3(1e-4f);
     world.max += glm::vec3(1e-4f);
@@ -593,6 +598,8 @@ void Scene::loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bv
             newGeom.translation, newGeom.rotation, newGeom.scale);
         newGeom.inverseTransform = glm::inverse(newGeom.transform);
         newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
+        // "MOTION": displacement during the exposure, for motion blur
+        newGeom.motion = readVec3(p, "MOTION", glm::vec3(0.0f));
         computeWorldBounds(newGeom);
 
         geoms.push_back(newGeom);

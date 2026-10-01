@@ -52,6 +52,7 @@ struct Ray
 {
     glm::vec3 origin;
     glm::vec3 direction;
+    float time;             // shutter time in [0, 1) for motion blur
 };
 
 struct Geom
@@ -65,8 +66,9 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
-    AABB worldBounds;
+    AABB worldBounds;       // covers the whole motion
     int lightIndex;         // index into the light list for emissive spheres/cubes, else -1
+    glm::vec3 motion;       // world space displacement over the shutter interval
 };
 
 // A triangle mesh asset. Triangles and BVH nodes of all meshes live in shared
@@ -318,6 +320,7 @@ struct ShadowRay
     glm::vec3 direction;
     int pixelIndex;         // -1: no shadow ray for this path
     glm::vec3 contribution; // added to the pixel if the ray is unoccluded
+    float time;
 };
 
 // Device-side view of the scene, passed to kernels by value.
