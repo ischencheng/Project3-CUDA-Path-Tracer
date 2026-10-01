@@ -54,7 +54,7 @@ struct RenderSettings
     bool antialiasing = true;
     bool russianRoulette = true;
     int rrStartDepth = 3;           // first bounce at which roulette may terminate paths
-    int samplerType = 0;            // SamplerType (sampler.h)
+    int samplerType = 1;            // SamplerType (sampler.h), Sobol by default
     bool nextEventEstimation = true;    // sample lights directly at every bounce
     bool multipleImportance = true;     // combine light and BSDF sampling (power heuristic)
     bool useBVH = true;             // traverse mesh BVHs (otherwise test every triangle)

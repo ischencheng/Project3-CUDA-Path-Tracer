@@ -301,6 +301,8 @@ void RenderImGui()
         const char* sortModes[SORT_MODE_COUNT] = { "Off", "thrust::sort_by_key", "CUB radix + gather", "CUB radix, indirect" };
         resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
         resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
+        const char* samplers[] = { "Random (hashed)", "Sobol (Owen scrambled)" };
+        resetNeeded |= ImGui::Combo("Sampler", &settings.samplerType, samplers, 2);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
         resetNeeded |= ImGui::Checkbox("Next event estimation", &settings.nextEventEstimation);
         if (settings.nextEventEstimation)
@@ -441,6 +443,7 @@ static void printUsage(const char* exe)
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
     printf("  --nee 0|1           next event estimation (direct light sampling)\n");
+    printf("  --sampler random|sobol  random numbers for all sample dimensions\n");
     printf("  --mis 0|1           multiple importance sampling of light and BSDF samples\n");
     printf("  --bvh 0|1           traverse mesh BVHs (0 = test every triangle)\n");
     printf("  --cull 0|1          test object bounding boxes before their geometry\n");
@@ -493,6 +496,7 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
+        else if (arg == "--sampler") settings.samplerType = next() == "random" ? 0 : 1;
         else if (arg == "--mis") settings.multipleImportance = parseBool(next());
         else if (arg == "--rr-depth") settings.rrStartDepth = std::stoi(next());
         else if (arg == "--bvh") settings.useBVH = parseBool(next());
@@ -550,7 +554,7 @@ static void writeStats(const char* sceneFile)
     out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
         << "," << s.compactionMode << "," << s.sortMode << "," << s.antialiasing
         << "," << s.russianRoulette << "," << s.useBVH << "," << s.cullBounds
-        << "," << s.nextEventEstimation << "," << s.multipleImportance
+        << "," << s.nextEventEstimation << "," << s.multipleImportance << "," << s.samplerType
         << "," << stats.avgIterationMs();
     for (int st = 0; st < STAGE_COUNT; ++st)
     {
