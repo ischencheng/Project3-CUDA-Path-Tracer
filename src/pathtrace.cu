@@ -21,6 +21,7 @@
 #include "sampler.h"
 #include "mathUtils.h"
 #include "textures.h"
+#include "lights.h"
 
 // Synchronizing after every kernel makes errors easy to attribute but
 // serializes the CPU and the GPU, so only do it in debug builds.
@@ -110,6 +111,16 @@ static glm::vec4* dev_vertexTangents = NULL;
 static std::vector<cudaArray_t> textureArrays;
 static std::vector<cudaTextureObject_t> textureObjects;
 static cudaTextureObject_t* dev_textures = NULL;
+// Lights and environment
+static Light* dev_lights = NULL;
+static float* dev_lightCdf = NULL;
+static int* dev_triLightIndex = NULL;
+static ShadowRay* dev_shadowRays = NULL;
+static cudaArray_t envArray = NULL;
+static cudaTextureObject_t envTexture = 0;
+static float* dev_envFunc = NULL;
+static float* dev_envMarginal = NULL;
+static float* dev_envConditional = NULL;
 static void* dev_cubScratch = NULL;
 static size_t cubScratchBytes = 0;
 static int sortKeyBits = 1;
@@ -181,6 +192,60 @@ static void uploadTextures(const std::vector<TextureData>& textures)
     uploadVector(dev_textures, textureObjects);
 }
 
+static void uploadEnvironment(const EnvironmentMap& env)
+{
+    if (env.width <= 0)
+    {
+        return;
+    }
+    cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
+    cudaMallocArray(&envArray, &desc, env.width, env.height);
+    cudaMemcpy2DToArray(envArray, 0, 0, env.rgba.data(), env.width * sizeof(float4), env.width * sizeof(float4),
+        env.height, cudaMemcpyHostToDevice);
+    cudaResourceDesc resDesc = {};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = envArray;
+    cudaTextureDesc texDesc = {};
+    texDesc.addressMode[0] = cudaAddressModeWrap;   // longitude wraps around
+    texDesc.addressMode[1] = cudaAddressModeClamp;  // latitude stops at the poles
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+    cudaCreateTextureObject(&envTexture, &resDesc, &texDesc, NULL);
+    uploadVector(dev_envFunc, env.func);
+    uploadVector(dev_envMarginal, env.marginalCdf);
+    uploadVector(dev_envConditional, env.conditionalCdf);
+}
+
+static EnvironmentView makeEnvironmentView()
+{
+    const EnvironmentMap& env = hst_scene->envMap;
+    EnvironmentView view = {};
+    view.hasMap = env.width > 0 ? 1 : 0;
+    view.color = hst_scene->state.backgroundColor;
+    view.enabled = view.hasMap || view.color.x > 0.0f || view.color.y > 0.0f || view.color.z > 0.0f;
+    view.intensity = env.intensity;
+    view.rotation = env.rotation;
+    view.texture = envTexture;
+    view.width = env.width;
+    view.height = env.height;
+    view.func = dev_envFunc;
+    view.marginalCdf = dev_envMarginal;
+    view.conditionalCdf = dev_envConditional;
+    view.integral = env.integral;
+    return view;
+}
+
+static LightsView makeLightsView()
+{
+    LightsView view;
+    view.lights = dev_lights;
+    view.cdf = dev_lightCdf;
+    view.count = (int)hst_scene->lights.size();
+    view.envSelectProb = hst_scene->envSampleProb;
+    return view;
+}
+
 static void freeTextures()
 {
     for (cudaTextureObject_t t : textureObjects)
@@ -195,6 +260,17 @@ static void freeTextures()
     textureArrays.clear();
     cudaFree(dev_textures);
     dev_textures = NULL;
+    if (envTexture)
+    {
+        cudaDestroyTextureObject(envTexture);
+        cudaFreeArray(envArray);
+        envTexture = 0;
+        envArray = NULL;
+    }
+    cudaFree(dev_envFunc);
+    cudaFree(dev_envMarginal);
+    cudaFree(dev_envConditional);
+    dev_envFunc = dev_envMarginal = dev_envConditional = NULL;
 }
 
 static SceneView makeSceneView(const RenderSettings& settings)
@@ -211,6 +287,8 @@ static SceneView makeSceneView(const RenderSettings& settings)
     view.uvs = dev_vertexUVs;
     view.tangents = dev_vertexTangents;
     view.textures = dev_textures;
+    view.triLightIndex = dev_triLightIndex;
+    view.lights = dev_lights;
     view.useBVH = settings.useBVH ? 1 : 0;
     view.cullBounds = settings.cullBounds ? 1 : 0;
     return view;
@@ -246,6 +324,14 @@ void pathtraceInit(Scene* scene)
     uploadVector(dev_vertexUVs, scene->vertexUVs);
     uploadVector(dev_vertexTangents, scene->vertexTangents);
     uploadTextures(scene->textures);
+    uploadEnvironment(scene->envMap);
+    uploadVector(dev_lights, scene->lights);
+    uploadVector(dev_lightCdf, scene->lightCdf);
+    if (!scene->lights.empty())
+    {
+        uploadVector(dev_triLightIndex, scene->triLightIndex);
+    }
+    cudaMalloc(&dev_shadowRays, pixelcount * sizeof(ShadowRay));
 
     cudaMalloc(&dev_pathsAlt, pixelcount * sizeof(PathSegment));
     cudaMalloc(&dev_intersectionsAlt, pixelcount * sizeof(ShadeableIntersection));
@@ -306,6 +392,14 @@ void pathtraceFree()
     cudaFree(dev_vertexUVs);
     cudaFree(dev_vertexTangents);
     freeTextures();
+    cudaFree(dev_lights);
+    cudaFree(dev_lightCdf);
+    cudaFree(dev_triLightIndex);
+    cudaFree(dev_shadowRays);
+    dev_lights = NULL;
+    dev_lightCdf = NULL;
+    dev_triLightIndex = NULL;
+    dev_shadowRays = NULL;
     dev_meshes = NULL;
     dev_bvhNodes = NULL;
     dev_triGeoms = NULL;
@@ -492,21 +586,56 @@ struct ShadeParams
     int iter;
     int depth;
     RenderSettings settings;
-    glm::vec3 background;
     SceneView scene;
+    LightsView lights;
+    EnvironmentView env;
     glm::vec3* image;
 };
 
-// Shades one bounce: accumulates emission into the image, evaluates the BSDF
-// and spawns the continuation ray. Paths that miss the scene, hit a light, or
-// run out of bounces are marked as terminated (remainingBounces = 0) so that
-// they can be stream compacted away.
+// Whether next event estimation can contribute for these BSDF parameters.
+__device__ inline bool hasNonDeltaLobe(const BSDFParams& p)
+{
+    switch (p.type)
+    {
+    case MATERIAL_DIFFUSE:
+        return true;
+    case MATERIAL_PBR:
+        return p.alpha >= DELTA_ALPHA || p.metallic < 1.0f;
+    case MATERIAL_SPECULAR:
+    case MATERIAL_DIELECTRIC:
+        return p.alpha >= DELTA_ALPHA;
+    default:
+        return false;
+    }
+}
+
+// Weight of emission found by BSDF sampling. With MIS it is balanced against
+// the light sampling pdf of the same direction; with NEE only, emission from
+// samplable lights is skipped (light sampling already accounted for it).
+__device__ inline float bsdfHitWeight(const ShadeParams& p, const PathSegment& path, float lightPdf)
+{
+    if (!p.settings.nextEventEstimation || (path.flags & PATH_FLAG_DELTA_BOUNCE))
+    {
+        return 1.0f;
+    }
+    if (!p.settings.multipleImportance)
+    {
+        return lightPdf > 0.0f ? 0.0f : 1.0f;
+    }
+    return powerHeuristic(path.lastPdf, lightPdf);
+}
+
+// Shades one bounce: accumulates emission into the image, samples a light
+// (next event estimation) and the BSDF, and spawns the continuation ray.
+// Paths that miss the scene, hit a light, or run out of bounces are marked as
+// terminated (remainingBounces = 0) so that they can be stream compacted away.
 __global__ void shadeMaterial(
     ShadeParams params,
     int num_paths,
     const int* order,   // optional permutation (material-sorted indices)
     const ShadeableIntersection* shadeableIntersections,
-    PathSegment* pathSegments)
+    PathSegment* pathSegments,
+    ShadowRay* shadowRays)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -517,6 +646,7 @@ __global__ void shadeMaterial(
     {
         idx = order[idx];
     }
+    shadowRays[idx].pixelIndex = -1;
 
     PathSegment path = pathSegments[idx];
     if (path.remainingBounces <= 0)
@@ -536,24 +666,21 @@ __global__ void shadeMaterial(
 
     if (intersection.t <= 0.0f)
     {
-        // The ray escaped the scene.
-        addToImage(params.image, path.pixelIndex, path.throughput * params.background);
-        path.remainingBounces = 0;
+        // The ray escaped the scene and sees the environment.
+        if (params.env.enabled)
+        {
+            glm::vec3 dir = path.ray.direction;
+            float lightPdf = params.lights.envSelectProb > 0.0f
+                ? params.lights.envSelectProb * environmentPdf(params.env, dir) : 0.0f;
+            float w = bsdfHitWeight(params, path, lightPdf);
+            addToImage(params.image, path.pixelIndex, path.throughput * environmentRadiance(params.env, dir) * w);
+        }
         pathSegments[idx].remainingBounces = 0;
         return;
     }
 
     const Material material = params.scene.materials[intersection.materialId];
     SurfaceHit hit = computeSurfaceHit(params.scene, path.ray, intersection);
-
-    if (material.type == MATERIAL_EMITTING)
-    {
-        addToImage(params.image, path.pixelIndex, path.throughput * material.emission);
-        pathSegments[idx].remainingBounces = 0;
-        return;
-    }
-
-    SampleContext sampler = makeSampleContext(path.pixelIndex, params.iter, params.settings.samplerType);
     glm::vec3 wo = -path.ray.direction;
     // Interpolated normals can face away from the viewer at silhouettes; fall
     // back to the geometric normal there.
@@ -562,14 +689,92 @@ __global__ void shadeMaterial(
         hit.shadingNormal = hit.normal;
     }
     MaterialEval mat = evaluateMaterial(material, hit, params.scene.textures, wo);
+    if (material.type == MATERIAL_EMITTING)
+    {
+        mat.emission = material.emission;
+    }
+
+    // Emission found by following the BSDF sample of the previous bounce.
+    if (mat.emission.x > 0.0f || mat.emission.y > 0.0f || mat.emission.z > 0.0f)
+    {
+        int lightIndex = intersection.primId >= 0
+            ? (params.scene.triLightIndex ? params.scene.triLightIndex[intersection.primId] : -1)
+            : params.scene.geoms[intersection.geomId].lightIndex;
+        float lightPdf = 0.0f;
+        if (lightIndex >= 0)
+        {
+            const Light& light = params.scene.lights[lightIndex];
+            if (light.geomId == intersection.geomId)
+            {
+                lightPdf = areaLightPdf(params.scene, light, path.ray.origin, path.ray.direction,
+                    intersection.t, hit.normal);
+            }
+        }
+        float w = bsdfHitWeight(params, path, lightPdf);
+        addToImage(params.image, path.pixelIndex, path.throughput * mat.emission * w);
+    }
+    if (material.type == MATERIAL_EMITTING)
+    {
+        pathSegments[idx].remainingBounces = 0;
+        return;
+    }
+
+    SampleContext sampler = makeSampleContext(path.pixelIndex, params.iter, params.settings.samplerType);
     const BSDFParams& bsdf = mat.bsdf;
     Frame frame = makeFrame(mat.shadingNormal);
 
-    if (mat.emission.x > 0.0f || mat.emission.y > 0.0f || mat.emission.z > 0.0f)
+    // --- Next event estimation: sample a point on a light (or a direction of
+    // the environment) and queue a shadow ray carrying its contribution.
+    const bool canSampleLights = params.lights.count > 0 || params.lights.envSelectProb > 0.0f;
+    if (params.settings.nextEventEstimation && canSampleLights && hasNonDeltaLobe(bsdf))
     {
-        addToImage(params.image, path.pixelIndex, path.throughput * mat.emission);
+        LightSample ls;
+        bool valid = false;
+        float uSelect = sample1D(sampler, bounceDimension(depth, BDIM_LIGHT_SELECT));
+        glm::vec2 uLight = sample2D(sampler, bounceDimension(depth, BDIM_LIGHT));
+        float pEnv = params.lights.envSelectProb;
+        if (uSelect < pEnv)
+        {
+            float pdf;
+            ls.wi = sampleEnvironment(params.env, uLight, pdf);
+            ls.pdf = pEnv * pdf;
+            ls.distance = FLT_MAX;
+            ls.radiance = environmentRadiance(params.env, ls.wi);
+            valid = ls.pdf > 0.0f;
+        }
+        else if (params.lights.count > 0)
+        {
+            float u = (uSelect - pEnv) / (1.0f - pEnv);
+            int li = selectLight(params.lights, u);
+            valid = sampleAreaLight(params.scene, params.lights.lights[li], hit.position, uLight, ls);
+        }
+
+        if (valid && maxComponent(ls.radiance) > 0.0f)
+        {
+            float bsdfPdf;
+            glm::vec3 fcos = evalBSDF(bsdf, frame, wo, ls.wi, bsdfPdf);
+            bool transmits = glm::dot(ls.wi, hit.normal) < 0.0f;
+            // reflection must stay above the geometric surface, transmission below
+            bool sideOk = !transmits || bsdf.type == MATERIAL_DIELECTRIC;
+            if (sideOk && maxComponent(fcos) > 0.0f)
+            {
+                float w = params.settings.multipleImportance ? powerHeuristic(ls.pdf, bsdfPdf) : 1.0f;
+                glm::vec3 contribution = path.throughput * fcos * ls.radiance * (w / ls.pdf);
+                if (isFiniteVec(contribution) && maxComponent(contribution) > 0.0f)
+                {
+                    ShadowRay sr;
+                    sr.origin = hit.position + (transmits ? -hit.normal : hit.normal) * RAY_EPSILON;
+                    sr.direction = ls.wi;
+                    sr.maxT = ls.distance == FLT_MAX ? FLT_MAX : ls.distance * (1.0f - 1e-3f) - RAY_EPSILON;
+                    sr.contribution = contribution;
+                    sr.pixelIndex = path.pixelIndex;
+                    shadowRays[idx] = sr;
+                }
+            }
+        }
     }
 
+    // --- BSDF sampling for the continuation ray.
     BSDFSample bs;
     float uLobe = sample1D(sampler, bounceDimension(depth, BDIM_LOBE));
     glm::vec2 uDir = sample2D(sampler, bounceDimension(depth, BDIM_BSDF));
@@ -623,6 +828,29 @@ __global__ void shadeMaterial(
     }
 
     pathSegments[idx] = path;
+}
+
+// Traces the shadow rays queued by the shading kernel and adds the light
+// contribution of the unoccluded ones.
+__global__ void traceShadowRays(int num_paths, const ShadowRay* shadowRays, SceneView scene, glm::vec3* image)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths)
+    {
+        return;
+    }
+    const ShadowRay sr = shadowRays[idx];
+    if (sr.pixelIndex < 0)
+    {
+        return;
+    }
+    Ray ray;
+    ray.origin = sr.origin;
+    ray.direction = sr.direction;
+    if (!occluded(scene, ray, sr.maxT))
+    {
+        addToImage(image, sr.pixelIndex, sr.contribution);
+    }
 }
 
 static inline void stageBegin(bool profile)
@@ -820,18 +1048,29 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeParams.iter = iter;
         shadeParams.depth = depth;
         shadeParams.settings = settings;
-        shadeParams.background = hst_scene->state.backgroundColor;
         shadeParams.scene = sceneView;
+        shadeParams.lights = makeLightsView();
+        shadeParams.env = makeEnvironmentView();
         shadeParams.image = dev_image;
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             shadeParams,
             num_paths,
             shadeOrder,
             dev_intersections,
-            dev_paths
+            dev_paths,
+            dev_shadowRays
         );
         checkCUDAError("shade");
         stageEnd(profile, STAGE_SHADE);
+
+        if (settings.nextEventEstimation)
+        {
+            stageBegin(profile);
+            traceShadowRays<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                num_paths, dev_shadowRays, sceneView, dev_image);
+            checkCUDAError("shadow rays");
+            stageEnd(profile, STAGE_SHADOW);
+        }
         depth++;
 
         if (settings.compactionMode != COMPACT_OFF)

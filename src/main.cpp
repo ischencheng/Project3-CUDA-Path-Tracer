@@ -273,7 +273,7 @@ void InitImguiData(GuiDataContainer* guiData)
 }
 
 static const char* stageNames[STAGE_COUNT] = {
-    "Generate", "Intersect", "Sort", "Shade", "Compact", "Gather"
+    "Generate", "Intersect", "Sort", "Shade", "Compact", "Shadow"
 };
 
 void RenderImGui()
@@ -302,6 +302,11 @@ void RenderImGui()
         resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
         resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
+        resetNeeded |= ImGui::Checkbox("Next event estimation", &settings.nextEventEstimation);
+        if (settings.nextEventEstimation)
+        {
+            resetNeeded |= ImGui::Checkbox("Multiple importance sampling", &settings.multipleImportance);
+        }
         resetNeeded |= ImGui::Checkbox("Russian roulette", &settings.russianRoulette);
         if (settings.russianRoulette)
         {
@@ -435,6 +440,8 @@ static void printUsage(const char* exe)
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
+    printf("  --nee 0|1           next event estimation (direct light sampling)\n");
+    printf("  --mis 0|1           multiple importance sampling of light and BSDF samples\n");
     printf("  --bvh 0|1           traverse mesh BVHs (0 = test every triangle)\n");
     printf("  --cull 0|1          test object bounding boxes before their geometry\n");
     printf("  --bvh-leaf N, --bvh-depth N, --bvh-bins N   BVH build parameters\n");
@@ -485,6 +492,8 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         }
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
+        else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
+        else if (arg == "--mis") settings.multipleImportance = parseBool(next());
         else if (arg == "--rr-depth") settings.rrStartDepth = std::stoi(next());
         else if (arg == "--bvh") settings.useBVH = parseBool(next());
         else if (arg == "--cull") settings.cullBounds = parseBool(next());
@@ -541,6 +550,7 @@ static void writeStats(const char* sceneFile)
     out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
         << "," << s.compactionMode << "," << s.sortMode << "," << s.antialiasing
         << "," << s.russianRoulette << "," << s.useBVH << "," << s.cullBounds
+        << "," << s.nextEventEstimation << "," << s.multipleImportance
         << "," << stats.avgIterationMs();
     for (int st = 0; st < STAGE_COUNT; ++st)
     {

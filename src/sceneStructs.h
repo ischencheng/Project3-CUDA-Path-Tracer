@@ -66,6 +66,7 @@ struct Geom
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
     AABB worldBounds;
+    int lightIndex;         // index into the light list for emissive spheres/cubes, else -1
 };
 
 // A triangle mesh asset. Triangles and BVH nodes of all meshes live in shared
@@ -206,6 +207,20 @@ struct RenderState
     glm::vec3 backgroundColor;
 };
 
+// CPU side environment map.
+struct EnvironmentMap
+{
+    int width = 0;
+    int height = 0;
+    std::vector<float> rgba;        // linear radiance, 4 floats per texel
+    std::vector<float> func;
+    std::vector<float> marginalCdf;
+    std::vector<float> conditionalCdf;
+    float integral = 0.0f;
+    float intensity = 1.0f;
+    float rotation = 0.0f;          // radians
+};
+
 enum PathFlags
 {
     PATH_FLAG_DELTA_BOUNCE = 1,     // the last scattering event was a delta lobe
@@ -249,6 +264,62 @@ struct SurfaceHit
     bool frontFace;             // true if the ray hit the outside of the surface
 };
 
+enum LightType
+{
+    LIGHT_TRIANGLE = 0,
+    LIGHT_SPHERE,
+    LIGHT_CUBE
+};
+
+// An emitting surface that can be sampled for next event estimation.
+struct Light
+{
+    int type;
+    int geomId;
+    int primId;             // triangle index for LIGHT_TRIANGLE
+    float area;             // world space surface area
+    float selectPdf;        // probability of picking this light (env choice included)
+    glm::vec3 v0;           // world space triangle for LIGHT_TRIANGLE
+    glm::vec3 e1;
+    glm::vec3 e2;
+};
+
+struct LightsView
+{
+    const Light* lights;
+    const float* cdf;       // count + 1 entries, power-proportional
+    int count;
+    float envSelectProb;    // probability of sampling the environment instead
+};
+
+// Environment: either a constant color or an equirectangular HDR map with a
+// piecewise-constant importance sampling distribution.
+struct EnvironmentView
+{
+    int hasMap;
+    int enabled;            // the environment emits anything at all
+    glm::vec3 color;        // constant radiance when there is no map
+    float intensity;
+    float rotation;         // radians around +y
+    cudaTextureObject_t texture;
+    int width;
+    int height;
+    const float* func;          // width * height sampling weights (luminance * sin theta)
+    const float* marginalCdf;   // height + 1
+    const float* conditionalCdf;// height * (width + 1)
+    float integral;             // mean of func over the unit square
+};
+
+// Shadow ray queued by the shading kernel for next event estimation.
+struct ShadowRay
+{
+    glm::vec3 origin;
+    float maxT;
+    glm::vec3 direction;
+    int pixelIndex;         // -1: no shadow ray for this path
+    glm::vec3 contribution; // added to the pixel if the ray is unoccluded
+};
+
 // Device-side view of the scene, passed to kernels by value.
 struct SceneView
 {
@@ -263,6 +334,8 @@ struct SceneView
     const glm::vec2* uvs;
     const glm::vec4* tangents;
     const cudaTextureObject_t* textures;
+    const int* triLightIndex;   // light index per triangle (or NULL)
+    const Light* lights;
     int useBVH;         // 0: test every triangle of a mesh
     int cullBounds;     // test each object's world AABB before its geometry
 };

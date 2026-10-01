@@ -54,6 +54,7 @@ set(headers
     src/meshLoader.h
     src/interactions.h
     src/intersections.h
+    src/lights.h
     src/mathUtils.h
     src/glslUtility.hpp
     src/pathtrace.h

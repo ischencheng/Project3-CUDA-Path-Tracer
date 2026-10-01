@@ -294,6 +294,199 @@ int Scene::loadMesh(const std::string& file, int defaultMaterial)
     return id;
 }
 
+void Scene::loadEnvironmentMap(const std::string& file)
+{
+    std::string path = sceneDir + file;
+    int w, h, comp;
+    float* pixels = stbi_loadf(path.c_str(), &w, &h, &comp, 4);
+    if (!pixels)
+    {
+        cout << "Couldn't load environment map " << path << ": " << stbi_failure_reason() << endl;
+        return;
+    }
+    envMap.width = w;
+    envMap.height = h;
+    envMap.rgba.assign(pixels, pixels + (size_t)w * h * 4);
+    stbi_image_free(pixels);
+
+    // Sampling weights: luminance times sin(theta) to account for the
+    // equirectangular stretching near the poles.
+    envMap.func.resize((size_t)w * h);
+    envMap.conditionalCdf.resize((size_t)h * (w + 1));
+    envMap.marginalCdf.resize(h + 1);
+    std::vector<float> rowIntegral(h);
+    for (int y = 0; y < h; y++)
+    {
+        float sinTheta = sinf(PI * (y + 0.5f) / h);
+        float* cdf = &envMap.conditionalCdf[(size_t)y * (w + 1)];
+        cdf[0] = 0.0f;
+        for (int x = 0; x < w; x++)
+        {
+            const float* c = &envMap.rgba[((size_t)y * w + x) * 4];
+            float f = (0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]) * sinTheta;
+            envMap.func[(size_t)y * w + x] = f;
+            cdf[x + 1] = cdf[x] + f / w;
+        }
+        rowIntegral[y] = cdf[w];
+        for (int x = 1; x <= w; x++)
+        {
+            cdf[x] = rowIntegral[y] > 0.0f ? cdf[x] / rowIntegral[y] : (float)x / w;
+        }
+    }
+    envMap.marginalCdf[0] = 0.0f;
+    for (int y = 0; y < h; y++)
+    {
+        envMap.marginalCdf[y + 1] = envMap.marginalCdf[y] + rowIntegral[y] / h;
+    }
+    envMap.integral = envMap.marginalCdf[h];
+    for (int y = 1; y <= h; y++)
+    {
+        envMap.marginalCdf[y] = envMap.integral > 0.0f ? envMap.marginalCdf[y] / envMap.integral : (float)y / h;
+    }
+    cout << "Loaded environment map " << path << " (" << w << "x" << h << ")" << endl;
+}
+
+static glm::vec3 sampleTextureNearest(const TextureData& tex, glm::vec2 uv)
+{
+    uv -= glm::floor(uv);
+    int x = glm::min((int)(uv.x * tex.width), tex.width - 1);
+    int y = glm::min((int)(uv.y * tex.height), tex.height - 1);
+    const unsigned char* p = &tex.rgba[((size_t)y * tex.width + x) * 4];
+    glm::vec3 c(p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f);
+    return glm::pow(c, glm::vec3(2.2f));
+}
+
+static float lum(glm::vec3 c)
+{
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
+void Scene::buildLights()
+{
+    lights.clear();
+    triLightIndex.assign(triangles.size(), -1);
+    std::vector<float> power;
+
+    for (size_t g = 0; g < geoms.size(); g++)
+    {
+        Geom& geom = geoms[g];
+        geom.lightIndex = -1;
+        if (geom.type == MESH)
+        {
+            const MeshInfo& mesh = meshes[geom.meshId];
+            glm::mat3 linear(geom.transform);
+            for (int t = mesh.triOffset; t < mesh.triOffset + mesh.triCount; t++)
+            {
+                if (triLightIndex[t] >= 0)
+                {
+                    continue;   // already a light through another instance
+                }
+                const Triangle& tri = triangles[t];
+                const Material& m = materials[geom.materialid >= 0 ? geom.materialid : tri.materialId];
+                if (lum(m.emission) <= 0.0f)
+                {
+                    continue;
+                }
+                // Estimate the triangle's emission (textured emitters are often
+                // mostly black, and those triangles should not be sampled).
+                glm::vec3 e = m.emission;
+                if (m.emissiveTex >= 0)
+                {
+                    const TextureData& tex = textures[m.emissiveTex];
+                    glm::vec2 uv0 = vertexUVs[tri.v[0]] * m.uvScale;
+                    glm::vec2 uv1 = vertexUVs[tri.v[1]] * m.uvScale;
+                    glm::vec2 uv2 = vertexUVs[tri.v[2]] * m.uvScale;
+                    glm::vec3 avg = (sampleTextureNearest(tex, uv0) + sampleTextureNearest(tex, uv1)
+                        + sampleTextureNearest(tex, uv2) + sampleTextureNearest(tex, (uv0 + uv1 + uv2) / 3.0f)) * 0.25f;
+                    e *= avg;
+                }
+                const TriangleGeom& tg = triGeoms[t];
+                Light light;
+                light.type = LIGHT_TRIANGLE;
+                light.geomId = (int)g;
+                light.primId = t;
+                light.v0 = glm::vec3(geom.transform * glm::vec4(tg.v0.x, tg.v0.y, tg.v0.z, 1.0f));
+                light.e1 = linear * glm::vec3(tg.e1.x, tg.e1.y, tg.e1.z);
+                light.e2 = linear * glm::vec3(tg.e2.x, tg.e2.y, tg.e2.z);
+                light.area = 0.5f * glm::length(glm::cross(light.e1, light.e2));
+                float p = lum(e) * light.area;
+                if (!(p > 0.0f))
+                {
+                    continue;
+                }
+                triLightIndex[t] = (int)lights.size();
+                lights.push_back(light);
+                power.push_back(p);
+            }
+            continue;
+        }
+
+        const Material& m = materials[geom.materialid];
+        if (lum(m.emission) <= 0.0f)
+        {
+            continue;
+        }
+        Light light{};
+        light.geomId = (int)g;
+        light.primId = -1;
+        glm::vec3 s = geom.scale;
+        if (geom.type == SPHERE)
+        {
+            light.type = LIGHT_SPHERE;
+            float r = 0.5f * s.x;   // sphere lights are assumed uniformly scaled
+            light.area = 4.0f * PI * r * r;
+        }
+        else
+        {
+            light.type = LIGHT_CUBE;
+            light.area = 2.0f * (s.x * s.y + s.y * s.z + s.z * s.x);
+        }
+        geom.lightIndex = (int)lights.size();
+        lights.push_back(light);
+        power.push_back(lum(m.emission) * light.area);
+    }
+
+    bool envEmits = envMap.width > 0 || lum(state.backgroundColor) > 0.0f;
+    double total = 0.0;
+    for (float p : power) total += p;
+    if (lights.empty())
+    {
+        envSampleProb = envEmits ? 1.0f : 0.0f;
+    }
+    else if (!envEmits)
+    {
+        envSampleProb = 0.0f;
+    }
+    else if (envSampleProb < 0.0f)
+    {
+        // Split the light samples by estimated flux: an environment of
+        // average radiance L delivers pi * L * 4 pi R^2 into a bounding sphere
+        // of radius R, a two-sided emitter of area A emits 2 pi * L * A.
+        AABB bounds = AABB::empty();
+        for (const Geom& g : geoms)
+        {
+            bounds.grow(g.worldBounds);
+        }
+        float radius = 0.5f * glm::length(bounds.max - bounds.min);
+        float avgEnv = envMap.width > 0 ? envMap.integral * 0.5f * PI * envMap.intensity : lum(state.backgroundColor);
+        double envFlux = PI * avgEnv * 4.0 * PI * radius * radius;
+        double lightFlux = 2.0 * PI * total;
+        envSampleProb = glm::clamp((float)(envFlux / (envFlux + lightFlux)), 0.1f, 0.9f);
+    }
+    lightCdf.assign(lights.size() + 1, 0.0f);
+    for (size_t i = 0; i < lights.size(); i++)
+    {
+        lightCdf[i + 1] = lightCdf[i] + (float)(power[i] / total);
+        lights[i].selectPdf = (1.0f - envSampleProb) * (float)(power[i] / total);
+    }
+    if (!lights.empty())
+    {
+        lightCdf.back() = 1.0f;
+        cout << "Lights: " << lights.size() << " area lights, environment sampled with probability "
+             << envSampleProb << endl;
+    }
+}
+
 // World-space bounds of the transformed object-space bounds.
 void Scene::computeWorldBounds(Geom& geom) const
 {
@@ -443,12 +636,22 @@ void Scene::loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bv
     camera.lensRadius = cameraData.value("APERTURE", 0.0f);
     camera.focalDistance = cameraData.value("FOCAL_DISTANCE", glm::length(camera.lookAt - camera.position));
 
+    // "Environment": { "COLOR": [r,g,b] or "FILE": "x.hdr", "INTENSITY": s,
+    //                  "ROTATION": degrees, "SAMPLE_PROB": p }
     state.backgroundColor = glm::vec3(0.0f);
     if (data.contains("Environment"))
     {
         const auto& env = data["Environment"];
         state.backgroundColor = readVec3(env, "COLOR", glm::vec3(0.0f)) * env.value("INTENSITY", 1.0f);
+        envMap.intensity = env.value("INTENSITY", 1.0f);
+        envMap.rotation = env.value("ROTATION", 0.0f) * PI / 180.0f;
+        envSampleProb = env.value("SAMPLE_PROB", -1.0f);   // negative: estimate from flux
+        if (env.contains("FILE"))
+        {
+            loadEnvironmentMap(env["FILE"]);
+        }
     }
+    buildLights();
 
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;

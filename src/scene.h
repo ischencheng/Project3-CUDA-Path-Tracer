@@ -15,11 +15,15 @@ private:
     void loadFromJSON(const std::string& jsonName, const BVHBuildSettings* bvhOverride);
     int loadMesh(const std::string& path, int defaultMaterial);
     void computeWorldBounds(Geom& geom) const;
+    void loadEnvironmentMap(const std::string& file);
 public:
     Scene(std::string filename, const BVHBuildSettings* bvhOverride = nullptr);
 
     // Changes the output resolution, keeping the vertical field of view.
     void setResolution(int width, int height);
+
+    // Collects emissive geometry into `lights` (call after loading).
+    void buildLights();
 
     int addMaterial(const Material& m);
     int addTexture(TextureData&& texture);
@@ -49,4 +53,11 @@ public:
     std::vector<TextureData> textures;
     std::unordered_map<std::string, int> textureCache; // file path -> texture id
     double totalBvhBuildMs = 0.0;
+
+    // Lights for next event estimation
+    std::vector<Light> lights;
+    std::vector<float> lightCdf;
+    std::vector<int> triLightIndex;     // per triangle, -1 if not a light
+    float envSampleProb = -1.0f;        // chance of sampling the environment when both exist
+    EnvironmentMap envMap;
 };

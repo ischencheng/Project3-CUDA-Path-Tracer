@@ -55,6 +55,8 @@ struct RenderSettings
     bool russianRoulette = true;
     int rrStartDepth = 3;           // first bounce at which roulette may terminate paths
     int samplerType = 0;            // SamplerType (sampler.h)
+    bool nextEventEstimation = true;    // sample lights directly at every bounce
+    bool multipleImportance = true;     // combine light and BSDF sampling (power heuristic)
     bool useBVH = true;             // traverse mesh BVHs (otherwise test every triangle)
     bool cullBounds = true;         // test object bounding boxes first
 
@@ -71,7 +73,7 @@ enum RenderStage
     STAGE_SORT,
     STAGE_SHADE,
     STAGE_COMPACT,
-    STAGE_GATHER,
+    STAGE_SHADOW,
     STAGE_COUNT
 };
 
