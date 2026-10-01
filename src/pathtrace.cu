@@ -19,6 +19,7 @@
 #include "interactions.h"
 #include "postprocess.h"
 #include "sampler.h"
+#include "mathUtils.h"
 
 // Synchronizing after every kernel makes errors easy to attribute but
 // serializes the CPU and the GPU, so only do it in debug builds.
@@ -256,7 +257,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     if (x < cam.resolution.x && y < cam.resolution.y) {
         int index = x + (y * cam.resolution.x);
         PathSegment segment;
-        SampleContext sampler = makeSampleContext(index, iter, SAMPLER_RANDOM);
+        SampleContext sampler = makeSampleContext(index, iter, settings.samplerType);
 
         segment.ray.origin = cam.position;
         segment.throughput = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -276,8 +277,23 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
             - cam.up * cam.pixelLength.y * ((float)y + jitter.y - (float)cam.resolution.y * 0.5f)
         );
 
+        // Thin lens depth of field: every ray through this pixel converges on
+        // the same point of the focal plane, but starts from a random point
+        // of the aperture disk.
+        if (cam.lensRadius > 0.0f)
+        {
+            glm::vec2 lens = cam.lensRadius * concentricSampleDisk(sample2D(sampler, DIM_LENS));
+            float ft = cam.focalDistance / glm::dot(segment.ray.direction, cam.view);
+            glm::vec3 focusPoint = cam.position + ft * segment.ray.direction;
+            segment.ray.origin = cam.position + cam.right * lens.x + cam.up * lens.y;
+            segment.ray.direction = glm::normalize(focusPoint - segment.ray.origin);
+        }
+
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
+        segment.mediumMaterial = -1;
+        segment.lastPdf = 0.0f;
+        segment.flags = PATH_FLAG_DELTA_BOUNCE;     // camera rays behave like a delta bounce
         pathSegments[index] = segment;
     }
 }
@@ -358,20 +374,28 @@ __device__ inline void addToImage(glm::vec3* image, int pixel, glm::vec3 radianc
     }
 }
 
+// Everything the shading kernel needs besides the per-path buffers.
+struct ShadeParams
+{
+    int iter;
+    int depth;
+    RenderSettings settings;
+    glm::vec3 background;
+    const Geom* geoms;
+    const Material* materials;
+    glm::vec3* image;
+};
+
 // Shades one bounce: accumulates emission into the image, evaluates the BSDF
 // and spawns the continuation ray. Paths that miss the scene, hit a light, or
 // run out of bounces are marked as terminated (remainingBounces = 0) so that
 // they can be stream compacted away.
 __global__ void shadeMaterial(
-    int iter,
-    int depth,
+    ShadeParams params,
     int num_paths,
     const int* order,   // optional permutation (material-sorted indices)
-    ShadeableIntersection* shadeableIntersections,
-    PathSegment* pathSegments,
-    Geom* geoms,
-    Material* materials,
-    glm::vec3* image)
+    const ShadeableIntersection* shadeableIntersections,
+    PathSegment* pathSegments)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -389,33 +413,95 @@ __global__ void shadeMaterial(
         return;
     }
 
+    const int depth = params.depth;
     ShadeableIntersection intersection = shadeableIntersections[idx];
+
+    // Beer-Lambert absorption along the segment travelled inside a medium.
+    if (path.mediumMaterial >= 0 && intersection.t > 0.0f)
+    {
+        glm::vec3 sigma = params.materials[path.mediumMaterial].absorption;
+        path.throughput *= glm::exp(-sigma * intersection.t);
+    }
+
     if (intersection.t <= 0.0f)
     {
         // The ray escaped the scene.
-        addToImage(image, path.pixelIndex, path.throughput * BACKGROUND_COLOR);
+        addToImage(params.image, path.pixelIndex, path.throughput * params.background);
+        path.remainingBounces = 0;
+        pathSegments[idx].remainingBounces = 0;
+        return;
+    }
+
+    const Material material = params.materials[intersection.materialId];
+    SurfaceHit hit = computeSurfaceHit(params.geoms, path.ray, intersection);
+
+    if (material.emission.x > 0.0f || material.emission.y > 0.0f || material.emission.z > 0.0f)
+    {
+        addToImage(params.image, path.pixelIndex, path.throughput * material.emission);
+    }
+    if (material.type == MATERIAL_EMITTING)
+    {
+        pathSegments[idx].remainingBounces = 0;
+        return;
+    }
+
+    SampleContext sampler = makeSampleContext(path.pixelIndex, params.iter, params.settings.samplerType);
+    BSDFParams bsdf;
+    bsdf.type = material.type;
+    bsdf.color = material.color;
+    bsdf.alpha = roughnessToAlpha(material.roughness);
+    bsdf.metallic = material.metallic;
+    bsdf.etap = hit.frontFace ? material.ior : 1.0f / material.ior;
+    Frame frame = makeFrame(hit.normal);
+    glm::vec3 wo = -path.ray.direction;
+
+    BSDFSample bs;
+    float uLobe = sample1D(sampler, bounceDimension(depth, BDIM_LOBE));
+    glm::vec2 uDir = sample2D(sampler, bounceDimension(depth, BDIM_BSDF));
+    bool scattered = sampleBSDF(bsdf, frame, wo, uLobe, uDir, bs)
+        && maxComponent(bs.weight) > 0.0f && isFiniteVec(bs.weight);
+
+    path.remainingBounces--;
+    if (!scattered)
+    {
         path.remainingBounces = 0;
     }
     else
     {
-        Material material = materials[intersection.materialId];
-        if (material.type == MATERIAL_EMITTING)
+        path.throughput *= bs.weight;
+        path.lastPdf = bs.pdf;
+        path.flags = bs.isDelta ? PATH_FLAG_DELTA_BOUNCE : 0;
+        if (bs.isTransmission)
         {
-            addToImage(image, path.pixelIndex, path.throughput * material.color * material.emittance);
-            path.remainingBounces = 0;
+            path.mediumMaterial = hit.frontFace ? intersection.materialId : -1;
         }
-        else
+        // Offset along the geometric normal to the side the new ray leaves on.
+        bool leavesFront = glm::dot(bs.wi, hit.normal) > 0.0f;
+        path.ray.origin = hit.position + (leavesFront ? hit.normal : -hit.normal) * RAY_EPSILON;
+        path.ray.direction = bs.wi;
+
+        // Russian roulette: once the path is a few bounces deep, terminate it
+        // with probability 1 - max(throughput) and reweight the survivors so
+        // the estimator stays unbiased.
+        if (params.settings.russianRoulette && depth + 1 >= params.settings.rrStartDepth
+            && path.remainingBounces > 0)
         {
-            SampleContext sampler = makeSampleContext(path.pixelIndex, iter, SAMPLER_RANDOM);
-            glm::vec2 u = sample2D(sampler, bounceDimension(depth, BDIM_BSDF));
-            SurfaceHit hit = computeSurfaceHit(geoms, path.ray, intersection);
-            scatterRay(path, hit, material, u);
+            float survive = maxComponent(path.throughput);
+            if (survive < 1.0f)
+            {
+                if (sample1D(sampler, bounceDimension(depth, BDIM_RR)) >= survive)
+                {
+                    path.remainingBounces = 0;
+                }
+                else
+                {
+                    path.throughput /= survive;
+                }
+            }
         }
     }
 
-    pathSegments[idx].ray = path.ray;
-    pathSegments[idx].throughput = path.throughput;
-    pathSegments[idx].remainingBounces = path.remainingBounces;
+    pathSegments[idx] = path;
 }
 
 static inline void stageBegin(bool profile)
@@ -609,16 +695,20 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         }
 
         stageBegin(profile);
+        ShadeParams shadeParams;
+        shadeParams.iter = iter;
+        shadeParams.depth = depth;
+        shadeParams.settings = settings;
+        shadeParams.background = hst_scene->state.backgroundColor;
+        shadeParams.geoms = dev_geoms;
+        shadeParams.materials = dev_materials;
+        shadeParams.image = dev_image;
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
-            iter,
-            depth,
+            shadeParams,
             num_paths,
             shadeOrder,
             dev_intersections,
-            dev_paths,
-            dev_geoms,
-            dev_materials,
-            dev_image
+            dev_paths
         );
         checkCUDAError("shade");
         stageEnd(profile, STAGE_SHADE);

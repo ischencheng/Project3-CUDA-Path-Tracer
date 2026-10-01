@@ -69,6 +69,7 @@ struct CommandLineOptions
     int warmup = 0;             // iterations excluded from timing statistics
     std::string output;         // overrides FILE from the scene file
     std::string statsFile;      // appends a CSV line of timing statistics
+    bool savePfm = false;       // also write the raw linear average as .pfm
 };
 static CommandLineOptions options;
 
@@ -298,7 +299,19 @@ void RenderImGui()
         resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
         resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
+        resetNeeded |= ImGui::Checkbox("Russian roulette", &settings.russianRoulette);
+        if (settings.russianRoulette)
+        {
+            resetNeeded |= ImGui::SliderInt("RR start depth", &settings.rrStartDepth, 1, 16);
+        }
         resetNeeded |= ImGui::SliderInt("Max depth", &renderState->traceDepth, 1, MAX_TRACKED_DEPTH);
+    }
+
+    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        Camera& cam = renderState->camera;
+        resetNeeded |= ImGui::SliderFloat("Lens radius", &cam.lensRadius, 0.0f, 2.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        resetNeeded |= ImGui::SliderFloat("Focal distance", &cam.focalDistance, 0.1f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
     }
 
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen))
@@ -409,6 +422,7 @@ static void printUsage(const char* exe)
     printf("  --sort off|thrust|cub       sort paths by material before shading\n");
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
+    printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
     printf("  --tonemap linear|reinhard|aces, --gamma 0|1, --exposure F\n");
 }
 
@@ -434,6 +448,7 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--warmup") options.warmup = std::stoi(next());
         else if (arg == "--profile") stats.profileStages = true;
         else if (arg == "--stats") options.statsFile = next();
+        else if (arg == "--pfm") options.savePfm = true;
         else if (arg == "--sort")
         {
             std::string v = next();
@@ -447,6 +462,8 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
                 : (v == "cub" || parseBool(v)) ? COMPACT_CUB : COMPACT_OFF;
         }
         else if (arg == "--aa") settings.antialiasing = parseBool(next());
+        else if (arg == "--rr") settings.russianRoulette = parseBool(next());
+        else if (arg == "--rr-depth") settings.rrStartDepth = std::stoi(next());
         else if (arg == "--gamma") settings.gammaCorrect = parseBool(next());
         else if (arg == "--exposure") settings.exposure = std::stof(next());
         else if (arg == "--tonemap")
@@ -611,6 +628,7 @@ void saveImage()
 
     // output image file
     Image img(width, height);
+    Image raw(options.savePfm ? width : 1, options.savePfm ? height : 1);
 
     for (int x = 0; x < width; x++)
     {
@@ -619,6 +637,10 @@ void saveImage()
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index];
             img.setPixel(width - 1 - x, y, displayTransform(glm::vec3(pix) / samples, guiData->settings));
+            if (options.savePfm)
+            {
+                raw.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            }
         }
     }
 
@@ -637,6 +659,10 @@ void saveImage()
 
     // CHECKITOUT
     img.savePNG(filename);
+    if (options.savePfm)
+    {
+        raw.savePFM(filename);
+    }
     //img.saveHDR(filename);  // Save a Radiance HDR file
 }
 

@@ -7,8 +7,6 @@
 #include <string>
 #include <vector>
 
-#define BACKGROUND_COLOR (glm::vec3(0.0f))
-
 enum GeomType
 {
     SPHERE,
@@ -35,18 +33,23 @@ struct Geom
 
 enum MaterialType
 {
-    MATERIAL_DIFFUSE = 0,
-    MATERIAL_SPECULAR,
-    MATERIAL_EMITTING,
+    MATERIAL_DIFFUSE = 0,   // Lambertian
+    MATERIAL_SPECULAR,      // conductor: perfect mirror, or GGX when rough
+    MATERIAL_DIELECTRIC,    // glass/water: Fresnel reflection + refraction, smooth or rough
+    MATERIAL_PBR,           // metallic-roughness (glTF): diffuse + GGX specular
+    MATERIAL_EMITTING,      // pure emitter
     MATERIAL_TYPE_COUNT
 };
 
 struct Material
 {
     int type;
-    glm::vec3 color;
-    float emittance;
-    float roughness;
+    glm::vec3 color;        // albedo / specular F0 / transmission tint / base color
+    glm::vec3 emission;     // emitted radiance (color * emittance)
+    float roughness;        // perceptual roughness, GGX alpha = roughness^2
+    float metallic;
+    float ior;
+    glm::vec3 absorption;   // Beer-Lambert absorption coefficient inside dielectrics
 };
 
 struct Camera
@@ -59,6 +62,8 @@ struct Camera
     glm::vec3 right;
     glm::vec2 fov;
     glm::vec2 pixelLength;
+    float lensRadius;       // thin lens aperture radius, 0 for a pinhole camera
+    float focalDistance;    // distance to the plane in focus along the view direction
 };
 
 struct RenderState
@@ -68,6 +73,12 @@ struct RenderState
     int traceDepth;
     std::vector<glm::vec3> image;
     std::string imageName;
+    glm::vec3 backgroundColor;
+};
+
+enum PathFlags
+{
+    PATH_FLAG_DELTA_BOUNCE = 1,     // the last scattering event was a delta lobe
 };
 
 struct PathSegment
@@ -76,6 +87,9 @@ struct PathSegment
     glm::vec3 throughput;   // product of BSDF * cos / pdf along the path so far
     int pixelIndex;
     int remainingBounces;   // <= 0 means the path is terminated
+    int mediumMaterial;     // material whose interior the ray travels through, -1 outside
+    float lastPdf;          // solid angle pdf of the BSDF sample that spawned the ray
+    int flags;              // PathFlags
 };
 
 // Use with a corresponding PathSegment to do:

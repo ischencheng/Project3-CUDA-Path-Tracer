@@ -15,6 +15,7 @@
 #define SQRT_OF_ONE_THIRD 0.5773502691896257645091487805019574556476f
 #define EPSILON           0.00001f
 #define RAY_EPSILON       0.0005f   // offset applied to spawned ray origins
+#define INV_PI            0.3183098861837906715377675267450287240689f
 
 #define MAX_TRACKED_DEPTH 64
 
@@ -51,6 +52,9 @@ struct RenderSettings
     int sortMode = SORT_OFF;
     int compactionMode = COMPACT_CUB;
     bool antialiasing = true;
+    bool russianRoulette = true;
+    int rrStartDepth = 3;           // first bounce at which roulette may terminate paths
+    int samplerType = 0;            // SamplerType (sampler.h)
 
     // display / output
     int toneMap = TONEMAP_NONE;

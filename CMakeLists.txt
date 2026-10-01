@@ -52,6 +52,7 @@ set(headers
     src/image.h
     src/interactions.h
     src/intersections.h
+    src/mathUtils.h
     src/glslUtility.hpp
     src/pathtrace.h
     src/postprocess.h

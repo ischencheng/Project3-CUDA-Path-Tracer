@@ -2,6 +2,7 @@
 
 #include <stb_image_write.h>
 
+#include <cstdio>
 #include <iostream>
 #include <string>
 
@@ -46,5 +47,24 @@ void Image::saveHDR(const std::string &baseFilename)
 {
     std::string filename = baseFilename + ".hdr";
     stbi_write_hdr(filename.c_str(), xSize, ySize, 3, (const float *) pixels);
+    std::cout << "Saved " + filename + "." << std::endl;
+}
+
+void Image::savePFM(const std::string &baseFilename)
+{
+    std::string filename = baseFilename + ".pfm";
+    FILE* f = fopen(filename.c_str(), "wb");
+    if (!f)
+    {
+        std::cout << "Could not write " << filename << std::endl;
+        return;
+    }
+    fprintf(f, "PF\n%d %d\n-1.0\n", xSize, ySize);
+    // PFM stores rows bottom to top.
+    for (int y = ySize - 1; y >= 0; y--)
+    {
+        fwrite(&pixels[y * xSize], sizeof(glm::vec3), xSize, f);
+    }
+    fclose(f);
     std::cout << "Saved " + filename + "." << std::endl;
 }
