@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import FuncFormatter, NullFormatter  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "analysis")
@@ -77,6 +78,16 @@ def save(fig, name):
     fig.savefig(os.path.join(IMG, name))
     plt.close(fig)
     print("saved", name)
+
+
+def plain_log_axis(ax, axis, ticks=None):
+    """Log axis with plain-number tick labels (1, 4, 16 ... or 0.01, 0.1)."""
+    fmt = FuncFormatter(lambda v, _: ("%g" % v))
+    target = ax.xaxis if axis == "x" else ax.yaxis
+    if ticks is not None:
+        target.set_ticks(ticks)
+    target.set_major_formatter(fmt)
+    target.set_minor_formatter(NullFormatter())
 
 
 def line(ax, x, y, color, label, marker=True):
@@ -239,9 +250,11 @@ def bvh():
         pts = sorted((int(r["triangles"]), float(r["ms"])) for r in rows if r["mode"] == m)
         x, y = zip(*pts)
         line(ax, x, y, SERIES[i], m)
-        end_label(ax, x[-1], y[-1], "%.1f ms" % y[-1] if y[-1] < 100 else "%.0f ms" % y[-1])
+        if m != "BVH + AABB culling":   # overlaps the plain BVH line
+            end_label(ax, x[-1], y[-1], "%.1f ms" % y[-1] if y[-1] < 100 else "%.0f ms" % y[-1])
     ax.set_xscale("log")
     ax.set_yscale("log")
+    plain_log_axis(ax, "y", [1, 2, 5, 10, 20, 50, 100, 200])
     ax.set_xlabel("triangles in the mesh")
     ax.set_ylabel("ms per iteration (log)")
     ax.set_title("Ray-mesh intersection: BVH vs brute force (320x320, depth 4)", loc="left")
@@ -282,6 +295,8 @@ def convergence(name, title_map, out, group="strategy"):
             line(ax, x, y, SERIES[i], k)
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
+        plain_log_axis(ax, "x", sorted({int(r["spp"]) for r in rows if r["scene"] == sc}))
+        plain_log_axis(ax, "y")
         ax.set_xlabel("samples per pixel")
         ax.set_title(title_map.get(sc, sc), loc="left")
         clean(ax, xgrid=True)
@@ -319,22 +334,25 @@ def denoiser():
     rows = read("denoiser.csv")
     if not rows:
         return
+    key = "display_rmse" if "display_rmse_raw" in rows[0] else "rmse"
     fig, ax = plt.subplots(figsize=(7, 3.6))
-    raw = sorted({(int(r["spp"]), float(r["rmse_raw"])) for r in rows})
+    raw = sorted({(int(r["spp"]), float(r[key + "_raw"])) for r in rows})
     x, y = zip(*raw)
     line(ax, x, y, MUTED, "path traced (no denoiser)")
     modes = list(dict.fromkeys(r["mode"] for r in rows))
     for i, m in enumerate(modes):
-        pts = sorted((int(r["spp"]), float(r["rmse_denoised"])) for r in rows if r["mode"] == m)
+        pts = sorted((int(r["spp"]), float(r[key + "_denoised"])) for r in rows if r["mode"] == m)
         x, y = zip(*pts)
         line(ax, x, y, SERIES[i], "denoised: " + m)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
+    plain_log_axis(ax, "x", sorted({int(r["spp"]) for r in rows}))
+    plain_log_axis(ax, "y", [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0])
     ax.set_xlabel("samples per pixel")
-    ax.set_ylabel("RMSE vs 8192 spp reference (log)")
-    ax.set_title("Open Image Denoise on the cover scene (640x360)", loc="left")
+    ax.set_ylabel("RMSE after tone mapping (log)" if key == "display_rmse" else "RMSE vs reference (log)")
+    ax.set_title("Open Image Denoise on the cover scene (640x360, vs 8192 spp reference)", loc="left")
     clean(ax, xgrid=True)
-    ax.legend(loc="lower left")
+    ax.legend(loc="upper right")
     save(fig, "denoiser.png")
 
 

@@ -32,7 +32,7 @@ struct DenoiserState
     OIDNFilter albedoFilter = nullptr;
     OIDNFilter normalFilter = nullptr;
     int filterConfig = -1;
-    std::string deviceName = "none";
+    std::string deviceName = "unavailable (no supported device)";
 };
 
 

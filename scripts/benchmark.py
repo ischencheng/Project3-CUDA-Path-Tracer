@@ -268,8 +268,15 @@ def textures(exe):
     write_csv("textures.csv", ["material", "ms", "shade_ms"], rows)
 
 
+def display(img):
+    """ACES filmic + gamma 2.2, clamped: the transform the showcase images use."""
+    a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+    x = np.clip((img * (a * img + b)) / (img * (c * img + d) + e), 0.0, 1.0)
+    return x ** (1.0 / 2.2)
+
+
 def denoiser(exe):
-    """OIDN quality (RMSE vs reference) and time."""
+    """OIDN quality (RMSE vs reference, linear and display space) and time."""
     res = "640x360"
     sc = scene("cover")
     ref_spp = 8192
@@ -286,9 +293,12 @@ def denoiser(exe):
             raw = read_pfm(os.path.join(WORK, "dn.%dsamp.pfm" % spp))
             den = read_pfm(os.path.join(WORK, "dn.%dsamp.denoised.pfm" % spp))
             rows.append([spp, name, float(np.sqrt(np.mean((raw - ref) ** 2))),
-                         float(np.sqrt(np.mean((den - ref) ** 2))), ms])
+                         float(np.sqrt(np.mean((den - ref) ** 2))), ms,
+                         float(np.sqrt(np.mean((display(raw) - display(ref)) ** 2))),
+                         float(np.sqrt(np.mean((display(den) - display(ref)) ** 2)))])
             print(spp, name, rows[-1])
-    write_csv("denoiser.csv", ["spp", "mode", "rmse_raw", "rmse_denoised", "denoise_ms"], rows)
+    write_csv("denoiser.csv", ["spp", "mode", "rmse_raw", "rmse_denoised", "denoise_ms",
+                               "display_rmse_raw", "display_rmse_denoised"], rows)
 
 
 def features(exe):

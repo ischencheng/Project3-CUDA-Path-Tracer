@@ -843,7 +843,12 @@ void saveImage()
         raw.savePFM(filename);
     }
 
-    if (guiData->settings.denoise && pathtraceDenoise(iteration))
+    const bool denoised = guiData->settings.denoise && pathtraceDenoise(iteration);
+    if (guiData->settings.denoise && !denoised)
+    {
+        printf("Denoising requested, but Open Image Denoise is %s\n", pathtraceDenoiserName());
+    }
+    if (denoised)
     {
         std::vector<glm::vec3> denoised;
         pathtraceCopyDenoisedToHost(denoised);

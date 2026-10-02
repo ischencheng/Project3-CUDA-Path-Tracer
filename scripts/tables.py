@@ -77,11 +77,13 @@ def main():
                     [[r["material"], "%.2f" % float(r["ms"]), "%.2f" % float(r["shade_ms"])] for r in rows]), "\n")
     if not which or "denoiser" in which:
         rows = read("denoiser.csv")
+        key = "display_rmse" if "display_rmse_raw" in rows[0] else "rmse"
         modes = list(dict.fromkeys(r["mode"] for r in rows))
         body = []
         for spp in dict.fromkeys(r["spp"] for r in rows):
             rs = [r for r in rows if r["spp"] == spp]
-            body.append([spp, "%.4f" % float(rs[0]["rmse_raw"])] + ["%.4f" % float(next(r for r in rs if r["mode"] == m)["rmse_denoised"]) for m in modes])
+            body.append([spp, "%.4f" % float(rs[0][key + "_raw"])]
+                        + ["%.4f" % float(next(r for r in rs if r["mode"] == m)[key + "_denoised"]) for m in modes])
         print(table(["spp", "raw RMSE"] + ["denoised: " + m for m in modes], body), "\n")
         print("denoise ms:", ", ".join("%s %.0f" % (r["mode"], float(r["denoise_ms"])) for r in rows if r["spp"] == "64"))
     if not which or "features" in which:
