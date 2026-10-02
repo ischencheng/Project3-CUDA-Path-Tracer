@@ -600,6 +600,15 @@ From bounce 3 on (configurable), a path survives with probability `min(1, max(th
 divided by that probability, so the estimator stays unbiased (image means with and without roulette agree to
 0.007% at 300 spp).
 
+Inside glass the throughput also carries the 1/eta^2 radiance scaling of refraction (0.44 for eta = 1.5), which
+leaving the glass undoes. Testing the raw throughput would kill paths just for being inside glass, so, like
+PBRT v4's `etaScale`, the survival test multiplies eta^2 of the current medium back in (the throughput itself is
+untouched). On the glass materials scene (480x270, 1024 spp, against a 16k spp reference) this cuts the RMSE by 15%
+(16% after tone mapping) for 1.5% more time per iteration, with the image mean unchanged to five digits. Roulette
+still does not pay off in that scene: without it the RMSE is 0.0065 at 3.58 ms per iteration, with it 0.0080 at
+2.72 ms, so efficiency (1 / (MSE x time)) is 13% lower with roulette, as much of the light reaches the camera
+through several bounces inside the glass.
+
 ![Live paths per bounce with and without Russian roulette](img/charts/roulette_alive.png)
 
 <details><summary>Data: iteration time with and without roulette (depth 16)</summary>
@@ -738,6 +747,14 @@ never overwritten.
   rounding difference flips a discrete choice (e.g. Fresnel reflect vs refract) so that path takes another, equally
   valid route. Image means agree to five digits.
 * **Resume**: a resumed checkpoint matches the uninterrupted render exactly.
+* **Checked against PBRT v4**: Fresnel and refraction (§9.3), the smooth and rough dielectric BSDFs (§9.5-9.7:
+  generalized half vector, f and pdf of both lobes, the 1/eta^2 radiance scaling), the thin lens (§5.2.3) and
+  Russian roulette (§13.4) were compared with the book formula by formula. They match, apart from intended
+  differences (Schlick instead of exact conductor Fresnel, roulette from bounce 3 instead of 2) and two problems
+  that are now fixed: a rough dielectric with IOR exactly 1 lost its transmitted light (the rough code path builds
+  the half vector from wi = -wo, which is zero; like PBRT, an IOR of 1 is now treated as smooth, and a rough IOR-1
+  box that rendered 24% too dark now matches the smooth one exactly), and roulette ignored the eta^2 factor
+  inside glass (see [Russian roulette](#russian-roulette)).
 
 ## Bloopers
 
