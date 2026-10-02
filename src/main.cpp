@@ -825,13 +825,14 @@ void saveImage()
 
     std::string filename = renderState->imageName;
     std::ostringstream ss;
-    if (options.headless)
+    if (options.headless && !options.output.empty())
     {
-        // deterministic names make scripted comparisons easier
+        // an explicit --out name is kept as is so scripts can find the file
         ss << filename << "." << samples << "samp";
     }
     else
     {
+        // every other save gets a new name, so earlier renders are never lost
         ss << filename << "." << startTimeString << "." << samples << "samp";
     }
     filename = ss.str();
