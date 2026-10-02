@@ -37,6 +37,10 @@ bit-identical.
 
 ## Feature overview
 
+![The cover image with callouts naming the feature behind each object: glTF glass dragon in a BVH, textured glTF helmet, environment lighting with MIS, GGX gold, rough and smooth glass, thin-lens depth of field](img/cover_annotated.jpg)
+
+*Where the features show up in the cover image (callouts drawn by `scripts/annotate_cover.py`).*
+
 | Area | Feature |
 |---|---|
 | Core | Lambertian and perfect specular BSDFs, stream compaction (thrust / CUB / adaptive), material sorting (four strategies), stochastic antialiasing |
