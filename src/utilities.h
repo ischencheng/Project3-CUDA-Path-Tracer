@@ -53,6 +53,7 @@ struct RenderSettings
     bool wavefront = false;         // per-material queues instead of one shading kernel
     int coherenceStartDepth = 0;    // sorting/queues only from this bounce on (earlier bounces are pixel-coherent)
     int compactionMode = COMPACT_CUB;
+    float compactThreshold = 0.6f;  // compact only if at most this fraction of paths survived
     bool antialiasing = true;
     bool motionBlur = true;         // sample a shutter time per path
     bool russianRoulette = true;

@@ -308,6 +308,10 @@ void RenderImGui()
         const char* compactModes[COMPACT_MODE_COUNT] = { "Off", "thrust::remove_if", "CUB select (ping-pong)" };
         const char* sortModes[SORT_MODE_COUNT] = { "Off", "thrust::sort_by_key", "CUB radix + gather", "CUB radix, indirect" };
         resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
+        if (settings.compactionMode != COMPACT_OFF)
+        {
+            ImGui::SliderFloat("Compact if alive <=", &settings.compactThreshold, 0.0f, 1.0f, "%.2f");
+        }
         resetNeeded |= ImGui::Checkbox("Wavefront material queues", &settings.wavefront);
         resetNeeded |= ImGui::SliderInt("Regroup from bounce", &settings.coherenceStartDepth, 0, 8);
         if (!settings.wavefront)
@@ -479,6 +483,7 @@ static void printUsage(const char* exe)
     printf("Pass a .ptstate file instead of a scene to resume a saved render; its settings are restored.\n");
     printf("  --sort off|thrust|cub       sort paths by material before shading\n");
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
+    printf("  --compact-threshold F       compact only when at most F of the paths survive\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
     printf("  --motion 0|1        motion blur (objects with MOTION move during the exposure)\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
@@ -546,6 +551,7 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
         else if (arg == "--wavefront") settings.wavefront = parseBool(next());
+        else if (arg == "--compact-threshold") settings.compactThreshold = std::stof(next());
         else if (arg == "--regroup-depth") settings.coherenceStartDepth = std::stoi(next());
         else if (arg == "--sampler") settings.samplerType = next() == "random" ? 0 : 1;
         else if (arg == "--mis") settings.multipleImportance = parseBool(next());

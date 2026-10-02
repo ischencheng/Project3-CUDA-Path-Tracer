@@ -127,6 +127,7 @@ static int* dev_sortKeysAlt = NULL;
 static int* dev_sortIndices = NULL;
 static int* dev_sortIndicesAlt = NULL;
 static int* dev_numSelected = NULL;
+static int* dev_aliveCounter = NULL;
 // Wavefront material queues
 static int* dev_queues = NULL;
 static int* dev_queueCounts = NULL;
@@ -396,6 +397,7 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_sortIndices, pixelcount * sizeof(int));
     cudaMalloc(&dev_sortIndicesAlt, pixelcount * sizeof(int));
     cudaMalloc(&dev_numSelected, sizeof(int));
+    cudaMalloc(&dev_aliveCounter, sizeof(int));
     cudaMalloc(&dev_queues, (size_t)QUEUE_COUNT * pixelcount * sizeof(int));
     cudaMalloc(&dev_queueCounts, QUEUE_COUNT * sizeof(int));
 
@@ -441,6 +443,8 @@ void pathtraceFree()
     cudaFree(dev_sortIndices);
     cudaFree(dev_sortIndicesAlt);
     cudaFree(dev_numSelected);
+    cudaFree(dev_aliveCounter);
+    dev_aliveCounter = NULL;
     cudaFree(dev_queues);
     cudaFree(dev_queueCounts);
     dev_queues = NULL;
@@ -669,7 +673,19 @@ struct ShadeParams
     glm::vec3* image;
     glm::vec3* aovAlbedo;   // first-hit features for the denoiser
     glm::vec3* aovNormal;
+    int* aliveCounter;      // number of paths that continue after this bounce
 };
+
+// Counts the calling threads whose path survives, with one atomic per warp.
+__device__ inline void countAlive(int* counter, bool alive)
+{
+    unsigned int active = __activemask();
+    unsigned int ballot = __ballot_sync(active, alive);
+    if ((threadIdx.x & 31) == __ffs(active) - 1 && ballot != 0)
+    {
+        atomicAdd(counter, __popc(ballot));
+    }
+}
 
 // Records the denoiser features once per path, at the first surface that is
 // not a perfect mirror/glass (those show the next surface instead).
@@ -935,6 +951,7 @@ __device__ inline void shadePath(
     }
 
     pathSegments[idx] = path;
+    countAlive(params.aliveCounter, path.remainingBounces > 0);
 }
 
 // Megakernel: shades every path whatever its material.
@@ -1270,6 +1287,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeParams.image = dev_image;
         shadeParams.aovAlbedo = dev_albedo;
         shadeParams.aovNormal = dev_normal;
+        shadeParams.aliveCounter = dev_aliveCounter;
+        cudaMemsetAsync(dev_aliveCounter, 0, sizeof(int));
         if (settings.wavefront && regroup)
         {
             shadeWavefront(shadeParams, num_paths, blockSize1d, profile);
@@ -1301,8 +1320,19 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         if (settings.compactionMode != COMPACT_OFF)
         {
+            // Compacting copies every live path, which only pays off when a
+            // good fraction of them terminated (e.g. not in closed scenes).
             stageBegin(profile);
-            num_paths = compactPaths(settings.compactionMode, num_paths);
+            int alive = 0;
+            cudaMemcpy(&alive, dev_aliveCounter, sizeof(int), cudaMemcpyDeviceToHost);
+            if (alive == 0)
+            {
+                num_paths = 0;
+            }
+            else if (alive <= settings.compactThreshold * num_paths)
+            {
+                num_paths = compactPaths(settings.compactionMode, num_paths);
+            }
             stageEnd(profile, STAGE_COMPACT);
         }
 
