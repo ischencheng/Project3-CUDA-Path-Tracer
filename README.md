@@ -699,8 +699,11 @@ by path and hash instead of copied).
 * **Unbiasedness**: BSDF sampling, NEE and MIS converge to the same image (mean radiance within 0.3% at 1024 spp;
   0.2% with an environment map); Russian roulette changes the mean by 0.007%.
 * **Order independence**: stream compaction on/off, every sort mode, BVH vs brute force and bounding-box culling
-  on/off all produce bit-identical images; wavefront kernels differ only by floating-point contraction
-  (99.99% identical pixels).
+  on/off all produce bit-identical images. The template-specialized wavefront kernels are equivalent but not
+  bit-identical, because the compiler contracts floating-point expressions differently: on the cover scene 95% of
+  pixels match exactly (99.99% in the materials box), almost all others differ in the last bits, and in 0.26% a
+  rounding difference flips a discrete choice (e.g. Fresnel reflect vs refract) so that path takes another, equally
+  valid route. Image means agree to five digits.
 * **Resume**: a resumed checkpoint matches the uninterrupted render exactly.
 
 ## Bloopers
