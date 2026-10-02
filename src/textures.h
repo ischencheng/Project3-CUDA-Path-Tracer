@@ -234,6 +234,13 @@ __device__ inline MaterialEval evaluateMaterial(const Material& m, const Surface
     e.bsdf.alpha = roughnessToAlpha(glm::clamp(roughness, 0.0f, 1.0f));
     e.bsdf.metallic = glm::clamp(metallic, 0.0f, 1.0f);
     e.bsdf.etap = hit.frontFace ? m.ior : 1.0f / m.ior;
+    if (m.type == MATERIAL_DIELECTRIC && m.ior == 1.0f)
+    {
+        // An interface without an IOR change cannot bend rays, so it is
+        // smooth whatever its roughness (as in PBRT); the rough code path
+        // would build a zero-length half vector from wi = -wo.
+        e.bsdf.alpha = 0.0f;
+    }
     e.albedo = color;
     return e;
 }
