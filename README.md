@@ -33,7 +33,7 @@ bit-identical.
 * [glTF / OBJ meshes and the BVH](#gltf--obj-meshes-and-the-bvh)
 * [Russian roulette](#russian-roulette), [wavefront material queues](#wavefront-material-queues),
   [denoising](#denoising-with-open-image-denoise), [restartable rendering](#restartable-rendering)
-* [Validation](#validation), [Bloopers](#bloopers), [Credits](#credits-and-references)
+* [Development log](#development-log), [Validation](#validation), [Bloopers](#bloopers), [Credits](#credits-and-references)
 
 ## Feature overview
 
@@ -682,6 +682,35 @@ on the helmet/sunset scene, resumed from a different directory). For the cover s
 **Further work:** compress the checkpoint (most of it is texture and environment data that could be referenced
 by path and hash instead of copied).
 
+## Development log
+
+Renders saved along the way, in the order they were made (all on October 1; the commit history follows the same
+order). Interactive saves and headless renders without `--out` get timestamped file names, so earlier images are
+never overwritten.
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="img/progress/01_first_light.jpg" width="100%" alt="First light: Lambert + mirror, BSDF sampling only, 500 spp. Still the base-code structure at 115 ms per iteration"><br><sub>1. First light: Lambert + mirror, BSDF sampling only, 500 spp. Still the base-code structure at 115 ms per iteration.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/02_materials.jpg" width="100%" alt="Glass, frosted glass, absorbing glass, rough gold and plastic, still without light sampling (1000 spp)"><br><sub>2. Glass, frosted glass, absorbing glass, rough gold and plastic, still without light sampling (1000 spp).</sub></td>
+<td width="33%" valign="top"><img src="img/progress/03_depth_of_field.jpg" width="100%" alt="First thin-lens depth of field"><br><sub>3. First thin-lens depth of field.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="img/progress/04_textures.jpg" width="100%" alt="Textures: the glTF helmet's maps, procedural wood/noise/checker, a bump-mapped gold sphere"><br><sub>4. Textures: the glTF helmet's maps, procedural wood/noise/checker, a bump-mapped gold sphere.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/05_environment_map.jpg" width="100%" alt="First HDR environment map with next event estimation"><br><sub>5. First HDR environment map with next event estimation.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/06_mis.jpg" width="100%" alt="MIS working on the glossy plates (32 spp)"><br><sub>6. MIS working on the glossy plates (32 spp).</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="img/progress/07_motion_blur.jpg" width="100%" alt="Motion blur, including a moving light"><br><sub>7. Motion blur, including a moving light.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/08_first_denoise.jpg" width="100%" alt="First Open Image Denoise result at 16 spp"><br><sub>8. First Open Image Denoise result at 16 spp.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/09_dragon.jpg" width="100%" alt="First look at the Khronos glass dragon"><br><sub>9. First look at the Khronos glass dragon.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="img/progress/10_cover_layout.jpg" width="100%" alt="Cover layout after putting everything on the cloth (48 spp)"><br><sub>10. Cover layout after putting everything on the cloth (48 spp).</sub></td>
+<td width="33%" valign="top"><img src="img/progress/11_bvh_heatmap.jpg" width="100%" alt="The BVH cost debug view"><br><sub>11. The BVH cost debug view.</sub></td>
+<td width="33%" valign="top"><img src="img/progress/12_final_cover.jpg" width="100%" alt="Final cover, 3000 spp"><br><sub>12. Final cover, 3000 spp.</sub></td>
+</tr>
+</table>
+
 ## Validation
 
 * **White furnace test** (`scripts/furnace.py`): a sphere inside a uniform white environment must vanish if its
@@ -708,12 +737,23 @@ by path and hash instead of copied).
 
 ## Bloopers
 
-<p align="center"><img src="img/bloopers/glowing_helmet.png" width="45%" alt="The helmet renders as a solid white glowing shape"> <img src="img/bloopers/edge_on_plates.png" width="45%" alt="MIS test scene where the plates are seen edge-on"></p>
+<table>
+<tr>
+<td width="50%" valign="top"><img src="img/bloopers/glowing_helmet.png" width="100%" alt="The helmet renders as a solid white glowing shape"><br><sub>The first glTF test, before textures. The helmet has an emissive factor of 1 that is meant to be multiplied by a mostly-black emissive texture, so without the texture the whole helmet became a light.</sub></td>
+<td width="50%" valign="top"><img src="img/bloopers/edge_on_plates.png" width="100%" alt="MIS test scene where the plates are seen edge-on"><br><sub>The first attempt at the Veach scene: the plates were tilted by guesswork and only show their edges. Computing each plate's tilt as the half-vector between the camera and the lights fixed it.</sub></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><img src="img/bloopers/floating_objects.jpg" width="100%" alt="Helmet and spheres floating above the cloth"><br><sub>Everything floats: I assumed the dragon's cloth floor was at y = 0. Parsing the glTF showed the cloth node is translated to y = -0.836, so every object hovered almost a unit too high.</sub></td>
+<td width="50%" valign="top"><img src="img/bloopers/marble_blue_clouds.jpg" width="100%" alt="The procedural marble sphere looks like blue clouds"><br><sub>"Marble" (second sphere) that looks like blue clouds: the turbulence frequency was so low that the whole sphere sat inside one vein. Sharper veins (<code>(1 - |sin|)^6</code>) and a higher frequency fixed it.</sub></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><img src="img/bloopers/nee_only_fireflies.jpg" width="100%" alt="Cornell box with fireflies everywhere"><br><sub>Light sampling without MIS: smooth walls sprinkled with fireflies. Not a bug: the light cube intersects the ceiling, so light samples taken from ceiling points right next to it carry an unbounded 1/r^2 (see the MIS section).</sub></td>
+<td width="50%" valign="top"></td>
+</tr>
+</table>
 
-*Left: the first glTF test, before textures. The helmet has an emissive factor of 1 that is meant to be
-multiplied by a mostly-black emissive texture, so without the texture the whole helmet became a light.
-Right: the first attempt at the Veach scene; the plates were tilted by guesswork and only show their edges.
-Computing each plate's tilt as the half-vector between the camera and the lights fixed it.*
+*The floating-objects and edge-on plate images were re-rendered from the original scene parameters, because the
+first versions had been overwritten by later renders with the same file name.*
 
 ## Credits and references
 
