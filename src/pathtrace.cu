@@ -940,7 +940,16 @@ __device__ inline void shadePath(
         if (params.settings.russianRoulette && depth + 1 >= params.settings.rrStartDepth
             && path.remainingBounces > 0)
         {
-            float survive = maxComponent(path.throughput);
+            // Inside a dielectric the throughput carries the 1/eta^2 radiance
+            // scaling, which leaving the medium undoes. Take it out before
+            // deciding (PBRT's etaScale), so paths in glass are not killed
+            // just for being inside it.
+            glm::vec3 rrThroughput = path.throughput;
+            if (path.mediumMaterial >= 0)
+            {
+                rrThroughput *= sqr(params.scene.materials[path.mediumMaterial].ior);
+            }
+            float survive = maxComponent(rrThroughput);
             if (survive < 1.0f)
             {
                 if (sample1D(sampler, bounceDimension(depth, BDIM_RR)) >= survive)
