@@ -26,10 +26,26 @@ struct DenoiserState
     OIDNBuffer albedo = nullptr;
     OIDNBuffer normal = nullptr;
     OIDNBuffer output = nullptr;
+    // Committed filters are cached: committing loads the network weights and
+    // (on GPU devices) builds kernels, which costs far more than executing.
+    OIDNFilter beautyFilter = nullptr;
+    OIDNFilter albedoFilter = nullptr;
+    OIDNFilter normalFilter = nullptr;
+    int filterConfig = -1;
     std::string deviceName = "none";
 };
 
+
 DenoiserState state;
+
+void releaseFilters()
+{
+    if (state.beautyFilter) oidnReleaseFilter(state.beautyFilter);
+    if (state.albedoFilter) oidnReleaseFilter(state.albedoFilter);
+    if (state.normalFilter) oidnReleaseFilter(state.normalFilter);
+    state.beautyFilter = state.albedoFilter = state.normalFilter = nullptr;
+    state.filterConfig = -1;
+}
 
 bool checkError(const char* what)
 {
@@ -158,12 +174,41 @@ void denoiserFree()
     {
         return;
     }
+    releaseFilters();
     oidnReleaseBuffer(state.color);
     oidnReleaseBuffer(state.albedo);
     oidnReleaseBuffer(state.normal);
     oidnReleaseBuffer(state.output);
     oidnReleaseDevice(state.device);
     state = DenoiserState();
+}
+
+static void prepareFilters(bool useAux, bool prefilterAux, bool highQuality)
+{
+    int config = (useAux ? 1 : 0) | (prefilterAux ? 2 : 0) | (highQuality ? 4 : 0);
+    if (config == state.filterConfig)
+    {
+        return;
+    }
+    releaseFilters();
+    if (useAux && prefilterAux)
+    {
+        // denoise the guides in place, then treat them as noise free
+        state.albedoFilter = makeFilter(nullptr, state.albedo, nullptr, state.albedo, false, false, highQuality);
+        state.normalFilter = makeFilter(nullptr, nullptr, state.normal, state.normal, false, false, highQuality);
+    }
+    state.beautyFilter = makeFilter(state.color, useAux ? state.albedo : nullptr, useAux ? state.normal : nullptr,
+        state.output, true, useAux && prefilterAux, highQuality);
+    state.filterConfig = config;
+}
+
+void denoiserPrepare(bool useAux, bool prefilterAux, bool highQuality)
+{
+    if (state.device)
+    {
+        prepareFilters(useAux, prefilterAux, highQuality);
+        checkError("prepare");
+    }
 }
 
 bool denoiserRun(bool useAux, bool prefilterAux, bool highQuality)
@@ -179,21 +224,13 @@ bool denoiserRun(bool useAux, bool prefilterAux, bool highQuality)
         upload(state.normal, state.devNormal);
     }
 
-    // Filters are cheap to create compared to running them, and recreating
-    // them keeps the toggles simple.
-    if (useAux && prefilterAux)
+    prepareFilters(useAux, prefilterAux, highQuality);
+    if (state.albedoFilter)
     {
-        OIDNFilter albedoFilter = makeFilter(nullptr, state.albedo, nullptr, state.albedo, false, false, highQuality);
-        oidnExecuteFilter(albedoFilter);
-        oidnReleaseFilter(albedoFilter);
-        OIDNFilter normalFilter = makeFilter(nullptr, nullptr, state.normal, state.normal, false, false, highQuality);
-        oidnExecuteFilter(normalFilter);
-        oidnReleaseFilter(normalFilter);
+        oidnExecuteFilter(state.albedoFilter);
+        oidnExecuteFilter(state.normalFilter);
     }
-    OIDNFilter filter = makeFilter(state.color, useAux ? state.albedo : nullptr, useAux ? state.normal : nullptr,
-        state.output, true, useAux && prefilterAux, highQuality);
-    oidnExecuteFilter(filter);
-    oidnReleaseFilter(filter);
+    oidnExecuteFilter(state.beautyFilter);
 
     if (!state.sharedMemory)
     {
@@ -213,6 +250,7 @@ bool denoiserAvailable() { return false; }
 bool denoiserInit(int, int, float*, float*, float*, float*) { return false; }
 void denoiserFree() {}
 bool denoiserRun(bool, bool, bool) { return false; }
+void denoiserPrepare(bool, bool, bool) {}
 std::string denoiserDeviceName() { return "unavailable (built without OIDN)"; }
 
 #endif // USE_OIDN

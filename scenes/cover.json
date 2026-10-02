@@ -1,0 +1,142 @@
+{
+    "Materials": {
+        "gold": {
+            "TYPE": "Metal",
+            "RGB": [
+                1.0,
+                0.77,
+                0.34
+            ],
+            "ROUGHNESS": 0.12
+        },
+        "glass": {
+            "TYPE": "Refractive",
+            "RGB": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "IOR": 1.5
+        },
+        "teal_glass": {
+            "TYPE": "Refractive",
+            "RGB": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "IOR": 1.5,
+            "ROUGHNESS": 0.18,
+            "ATTENUATION_COLOR": [
+                0.25,
+                0.7,
+                0.75
+            ],
+            "ATTENUATION_DISTANCE": 0.6
+        }
+    },
+    "Camera": {
+        "RES": [
+            1600,
+            900
+        ],
+        "FOVY": 13.0,
+        "ITERATIONS": 4000,
+        "DEPTH": 16,
+        "FILE": "cover",
+        "EYE": [
+            0.7,
+            1.6,
+            13.5
+        ],
+        "LOOKAT": [
+            0.0,
+            0.3,
+            0.0
+        ],
+        "UP": [
+            0.0,
+            1.0,
+            0.0
+        ],
+        "APERTURE": 0.09,
+        "FOCAL_DISTANCE": 13.3
+    },
+    "Environment": {
+        "FILE": "hdri/studio_small_09_2k.hdr",
+        "INTENSITY": 1.1,
+        "ROTATION": 60.0
+    },
+    "Objects": [
+        {
+            "TYPE": "mesh",
+            "FILE": "models/DragonAttenuation.glb",
+            "TRANS": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "TYPE": "mesh",
+            "FILE": "models/DamagedHelmet.glb",
+            "TRANS": [
+                -2.5,
+                -0.208,
+                0.9
+            ],
+            "ROTAT": [
+                0.0,
+                35.0,
+                0.0
+            ],
+            "SCALE": [
+                0.72,
+                0.72,
+                0.72
+            ]
+        },
+        {
+            "TYPE": "sphere",
+            "MATERIAL": "gold",
+            "TRANS": [
+                2.35,
+                -0.416,
+                1.1
+            ],
+            "SCALE": [
+                0.84,
+                0.84,
+                0.84
+            ]
+        },
+        {
+            "TYPE": "sphere",
+            "MATERIAL": "glass",
+            "TRANS": [
+                1.35,
+                -0.566,
+                2.4
+            ],
+            "SCALE": [
+                0.54,
+                0.54,
+                0.54
+            ]
+        },
+        {
+            "TYPE": "sphere",
+            "MATERIAL": "teal_glass",
+            "TRANS": [
+                -1.1,
+                -0.536,
+                2.7
+            ],
+            "SCALE": [
+                0.6,
+                0.6,
+                0.6
+            ]
+        }
+    ]
+}

@@ -23,6 +23,11 @@ void pathtraceCopyDenoisedToHost(std::vector<glm::vec3>& out);
 void pathtraceCopyFeaturesToHost(int iteration, std::vector<glm::vec3>& albedo, std::vector<glm::vec3>& normal);
 const char* pathtraceDenoiserName();
 
+// Traces one camera ray per pixel center and returns the number of bounding
+// box tests (x) and triangle tests (y) per pixel; also renders the cost
+// heatmap into `pbo` when given.
+void pathtraceBvhCost(uchar4* pbo, std::vector<glm::vec2>& cost);
+
 // Accumulation buffers (sums over iterations) for checkpoints.
 void pathtraceGetAccumulation(std::vector<glm::vec3>& image, std::vector<glm::vec3>& albedo,
     std::vector<glm::vec3>& normal);

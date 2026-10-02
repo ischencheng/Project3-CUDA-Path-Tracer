@@ -388,6 +388,11 @@ void pathtraceInit(Scene* scene)
     if (denoiserReady)
     {
         printf("Open Image Denoise ready (%s device)\n", denoiserDeviceName().c_str());
+        const RenderSettings& s = guiData->settings;
+        if (s.denoise)
+        {
+            denoiserPrepare(s.denoiseAux, s.denoisePrefilter, s.denoiseHighQuality);
+        }
     }
 
     cudaMalloc(&dev_pathsAlt, pixelcount * sizeof(PathSegment));
@@ -1382,7 +1387,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             source = dev_denoised;
             scale = 1.0f;
         }
-        if (settings.displayMode == DISPLAY_NORMAL)
+        if (settings.displayMode == DISPLAY_BVH_COST)
+        {
+            std::vector<glm::vec2> cost;
+            pathtraceBvhCost(pbo, cost);
+        }
+        else if (settings.displayMode == DISPLAY_NORMAL)
         {
             // map [-1, 1] to [0, 1] for viewing
             showNormals<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, 1.0f / iter, dev_normal);
@@ -1394,6 +1404,66 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     }
 
     checkCUDAError("pathtrace");
+}
+
+// Cost of the camera ray through each pixel center (BVH debug view).
+__global__ void bvhCostKernel(Camera cam, SceneView scene, glm::vec2* cost)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    if (x >= cam.resolution.x || y >= cam.resolution.y)
+    {
+        return;
+    }
+    Ray ray;
+    ray.origin = cam.position;
+    ray.direction = glm::normalize(cam.view
+        - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
+        - cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f));
+    ray.time = 0.0f;
+    TraversalCounters counters = { 0, 0 };
+    ShadeableIntersection isect;
+    intersectScene(scene, ray, isect, &counters);
+    cost[x + y * cam.resolution.x] = glm::vec2((float)counters.boxTests, (float)counters.triangleTests);
+}
+
+// Sequential single-hue ramp (light = cheap, dark = expensive) for the cost
+// of a ray: box tests plus triangle tests, saturating at `maxCost`.
+__global__ void showBvhCost(uchar4* pbo, glm::ivec2 resolution, const glm::vec2* cost, float maxCost)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    if (x >= resolution.x || y >= resolution.y)
+    {
+        return;
+    }
+    const glm::vec3 ramp[5] = {
+        glm::vec3(0xfc, 0xfc, 0xfb), glm::vec3(0xb7, 0xd3, 0xf6), glm::vec3(0x55, 0x98, 0xe7),
+        glm::vec3(0x25, 0x6a, 0xbf), glm::vec3(0x0d, 0x36, 0x6b) };
+    int index = x + y * resolution.x;
+    float t = glm::clamp((cost[index].x + cost[index].y) / maxCost, 0.0f, 1.0f) * 4.0f;
+    int i = glm::min((int)t, 3);
+    glm::vec3 c = glm::mix(ramp[i], ramp[i + 1], t - i);
+    pbo[index] = make_uchar4((unsigned char)c.x, (unsigned char)c.y, (unsigned char)c.z, 0);
+}
+
+void pathtraceBvhCost(uchar4* pbo, std::vector<glm::vec2>& cost)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    glm::vec2* dev_cost = NULL;
+    cudaMalloc(&dev_cost, pixelcount * sizeof(glm::vec2));
+    const dim3 block(8, 8);
+    const dim3 grid((cam.resolution.x + 7) / 8, (cam.resolution.y + 7) / 8);
+    bvhCostKernel<<<grid, block>>>(cam, makeSceneView(guiData->settings), dev_cost);
+    if (pbo != NULL)
+    {
+        showBvhCost<<<grid, block>>>(pbo, cam.resolution, dev_cost, 160.0f);
+    }
+    cost.resize(pixelcount);
+    cudaMemcpy(cost.data(), dev_cost, pixelcount * sizeof(glm::vec2), cudaMemcpyDeviceToHost);
+    cudaFree(dev_cost);
+    checkCUDAError("bvh cost");
 }
 
 // Averages the accumulation buffers into the denoiser inputs.

@@ -68,11 +68,14 @@ struct CommandLineOptions
     int spp = -1;               // overrides ITERATIONS from the scene file
     int depth = -1;             // overrides DEPTH from the scene file
     int resX = -1, resY = -1;   // overrides RES from the scene file
+    float aperture = -1.0f;     // overrides APERTURE
+    float focus = -1.0f;        // overrides FOCAL_DISTANCE
     int warmup = 0;             // iterations excluded from timing statistics
     std::string output;         // overrides FILE from the scene file
     std::string statsFile;      // appends a CSV line of timing statistics
     bool savePfm = false;       // also write the raw linear average as .pfm
     bool saveFeatures = false;  // also write the albedo/normal denoiser features
+    bool saveBvhCost = false;   // also write the BVH cost heatmap
     bool saveState = false;     // headless: write a checkpoint at the end
     int checkpointEvery = 0;    // headless: write a checkpoint every N iterations
     bool bvhOverride = false;   // BVH build settings given on the command line
@@ -363,7 +366,7 @@ void RenderImGui()
 
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen))
     {
-        const char* displayModes[DISPLAY_MODE_COUNT] = { "Render", "Albedo feature", "Normal feature" };
+        const char* displayModes[DISPLAY_MODE_COUNT] = { "Render", "Albedo feature", "Normal feature", "BVH cost" };
         ImGui::Combo("Show", &settings.displayMode, displayModes, DISPLAY_MODE_COUNT);
         const char* toneMaps[TONEMAP_COUNT] = { "Linear clamp", "Reinhard", "ACES" };
         ImGui::Combo("Tone map", &settings.toneMap, toneMaps, TONEMAP_COUNT);
@@ -470,6 +473,7 @@ static void printUsage(const char* exe)
     printf("  --spp N             number of iterations (overrides ITERATIONS)\n");
     printf("  --depth N           maximum path depth (overrides DEPTH)\n");
     printf("  --res WxH           image resolution (overrides RES)\n");
+    printf("  --aperture R, --focus D    thin lens radius and focal distance\n");
     printf("  --out NAME          output file prefix (overrides FILE)\n");
     printf("  --warmup N          iterations excluded from timing statistics\n");
     printf("  --profile           collect per-stage timings and alive-path counts\n");
@@ -478,6 +482,7 @@ static void printUsage(const char* exe)
     printf("  --denoise 0|1       run Open Image Denoise on the final image (saved as *.denoised.png)\n");
     printf("  --denoise-aux 0|1, --denoise-prefilter 0|1   denoiser feature options\n");
     printf("  --save-features     also save the albedo and normal feature images\n");
+    printf("  --save-bvh-cost     also save a heatmap of box + triangle tests per camera ray\n");
     printf("  --save-state        headless: save a checkpoint (*.ptstate) at the end\n");
     printf("  --checkpoint N      headless: save a checkpoint every N iterations\n");
     printf("Pass a .ptstate file instead of a scene to resume a saved render; its settings are restored.\n");
@@ -532,6 +537,7 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--denoise-aux") settings.denoiseAux = parseBool(next());
         else if (arg == "--denoise-prefilter") settings.denoisePrefilter = parseBool(next());
         else if (arg == "--save-features") options.saveFeatures = true;
+        else if (arg == "--save-bvh-cost") options.saveBvhCost = true;
         else if (arg == "--save-state") options.saveState = true;
         else if (arg == "--checkpoint") options.checkpointEvery = std::stoi(next());
         else if (arg == "--sort")
@@ -551,6 +557,8 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
         else if (arg == "--wavefront") settings.wavefront = parseBool(next());
+        else if (arg == "--aperture") options.aperture = std::stof(next());
+        else if (arg == "--focus") options.focus = std::stof(next());
         else if (arg == "--compact-threshold") settings.compactThreshold = std::stof(next());
         else if (arg == "--regroup-depth") settings.coherenceStartDepth = std::stoi(next());
         else if (arg == "--sampler") settings.samplerType = next() == "random" ? 0 : 1;
@@ -692,6 +700,8 @@ int main(int argc, char** argv)
     renderState = &scene->state;
     if (options.spp > 0) renderState->iterations = options.spp;
     if (options.depth > 0) renderState->traceDepth = options.depth;
+    if (options.aperture >= 0.0f) renderState->camera.lensRadius = options.aperture;
+    if (options.focus > 0.0f) renderState->camera.focalDistance = options.focus;
     if (!options.output.empty()) renderState->imageName = options.output;
     Camera& cam = renderState->camera;
     width = cam.resolution.x;
@@ -857,6 +867,31 @@ void saveImage()
             dnRaw.savePFM(filename + ".denoised");
         }
         printf("Denoised in %.2f ms (%s)\n", guiData->stats.lastDenoiseMs, pathtraceDenoiserName());
+    }
+    if (options.saveBvhCost)
+    {
+        std::vector<glm::vec2> cost;
+        pathtraceBvhCost(NULL, cost);
+        // same ramp as the preview: light = cheap, dark = expensive
+        const glm::vec3 ramp[5] = { glm::vec3(0xfc, 0xfc, 0xfb), glm::vec3(0xb7, 0xd3, 0xf6),
+            glm::vec3(0x55, 0x98, 0xe7), glm::vec3(0x25, 0x6a, 0xbf), glm::vec3(0x0d, 0x36, 0x6b) };
+        Image heat(width, height);
+        double boxes = 0.0, tris = 0.0;
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                glm::vec2 c = cost[x + y * width];
+                boxes += c.x;
+                tris += c.y;
+                float t = glm::clamp((c.x + c.y) / 160.0f, 0.0f, 1.0f) * 4.0f;
+                int i = std::min((int)t, 3);
+                heat.setPixel(width - 1 - x, y, glm::mix(ramp[i], ramp[i + 1], t - i) / 255.0f);
+            }
+        }
+        heat.savePNG(filename + ".bvhcost");
+        printf("Camera rays: %.1f box tests, %.1f triangle tests on average\n",
+            boxes / (width * height), tris / (width * height));
     }
     if (options.saveFeatures)
     {

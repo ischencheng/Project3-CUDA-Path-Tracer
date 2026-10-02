@@ -19,4 +19,8 @@ void denoiserFree();
 // final pass can treat them as noise free.
 bool denoiserRun(bool useAux, bool prefilterAux, bool highQuality);
 
+// Builds and commits the filters for these settings ahead of time (loading
+// weights and compiling kernels takes far longer than one execution).
+void denoiserPrepare(bool useAux, bool prefilterAux, bool highQuality);
+
 std::string denoiserDeviceName();

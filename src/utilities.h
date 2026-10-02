@@ -83,6 +83,7 @@ enum DisplayMode
     DISPLAY_RENDER = 0,     // the render (denoised if denoising is enabled)
     DISPLAY_ALBEDO,         // first-hit albedo feature
     DISPLAY_NORMAL,         // first-hit normal feature
+    DISPLAY_BVH_COST,       // bounding box + triangle tests of each camera ray
     DISPLAY_MODE_COUNT
 };
 

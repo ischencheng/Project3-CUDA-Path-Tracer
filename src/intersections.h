@@ -188,11 +188,23 @@ __device__ inline void loadNode(const BVHNode* nodes, int i, glm::vec3& bmin, gl
     triCount = __float_as_int(b.w);
 }
 
+// Optional traversal statistics for the BVH cost debug view. Every call site
+// in the renderer passes nullptr, which the inliner folds away.
+struct TraversalCounters
+{
+    int boxTests;
+    int triangleTests;
+};
+
 // Tests the triangles [first, first + count). Updates tBest/prim/bary on a
 // closer hit. With anyHit, returns on the first hit found.
 __device__ inline bool intersectTriangleRange(const TriangleGeom* tris, int first, int count,
-    const Ray& q, float& tBest, int& prim, glm::vec2& bary, bool anyHit)
+    const Ray& q, float& tBest, int& prim, glm::vec2& bary, bool anyHit, TraversalCounters* counters = nullptr)
 {
+    if (counters)
+    {
+        counters->triangleTests += count;
+    }
     bool hit = false;
     for (int i = first; i < first + count; i++)
     {
@@ -218,8 +230,12 @@ __device__ inline bool intersectTriangleRange(const TriangleGeom* tris, int firs
 // and far children are pushed with their entry distance so that they can be
 // skipped once a closer hit is known.
 __device__ inline bool intersectBVH(const SceneView& scene, const MeshInfo& mesh, const Ray& q,
-    float& tBest, int& prim, glm::vec2& bary, bool anyHit)
+    float& tBest, int& prim, glm::vec2& bary, bool anyHit, TraversalCounters* counters = nullptr)
 {
+    if (counters)
+    {
+        counters->boxTests++;
+    }
     glm::vec3 invDir = safeInverse(q.direction);
     glm::vec3 bmin, bmax;
     int leftFirst, triCount;
@@ -238,7 +254,7 @@ __device__ inline bool intersectBVH(const SceneView& scene, const MeshInfo& mesh
     {
         if (triCount > 0)
         {
-            if (intersectTriangleRange(scene.triGeoms, leftFirst, triCount, q, tBest, prim, bary, anyHit))
+            if (intersectTriangleRange(scene.triGeoms, leftFirst, triCount, q, tBest, prim, bary, anyHit, counters))
             {
                 hit = true;
                 if (anyHit)
@@ -271,6 +287,10 @@ __device__ inline bool intersectBVH(const SceneView& scene, const MeshInfo& mesh
         int lf1, tc1, lf2, tc2;
         loadNode(scene.bvhNodes, c1, min1, max1, lf1, tc1);
         loadNode(scene.bvhNodes, c2, min2, max2, lf2, tc2);
+        if (counters)
+        {
+            counters->boxTests += 2;
+        }
         float d1 = rayAABB(q.origin, invDir, min1, max1, tBest);
         float d2 = rayAABB(q.origin, invDir, min2, max2, tBest);
         if (d2 < d1)
@@ -315,19 +335,21 @@ __device__ inline bool intersectBVH(const SceneView& scene, const MeshInfo& mesh
 }
 
 __device__ inline bool intersectMesh(const SceneView& scene, const MeshInfo& mesh, const Ray& q,
-    float& tBest, int& prim, glm::vec2& bary, bool anyHit)
+    float& tBest, int& prim, glm::vec2& bary, bool anyHit, TraversalCounters* counters = nullptr)
 {
     if (scene.useBVH)
     {
-        return intersectBVH(scene, mesh, q, tBest, prim, bary, anyHit);
+        return intersectBVH(scene, mesh, q, tBest, prim, bary, anyHit, counters);
     }
     // brute force over every triangle of the mesh
-    return intersectTriangleRange(scene.triGeoms, mesh.triOffset, mesh.triCount, q, tBest, prim, bary, anyHit);
+    return intersectTriangleRange(scene.triGeoms, mesh.triOffset, mesh.triCount, q, tBest, prim, bary, anyHit,
+        counters);
 }
 
 // Closest hit over all scene geometry. Objects are tested in a flat loop (the
 // top level); triangle meshes descend into their own BVH (the bottom level).
-__device__ inline void intersectScene(const SceneView& scene, const Ray& ray, ShadeableIntersection& isect)
+__device__ inline void intersectScene(const SceneView& scene, const Ray& ray, ShadeableIntersection& isect,
+    TraversalCounters* counters = nullptr)
 {
     float tBest = FLT_MAX;
     int hitGeom = -1;
@@ -338,6 +360,10 @@ __device__ inline void intersectScene(const SceneView& scene, const Ray& ray, Sh
     for (int i = 0; i < scene.geomCount; i++)
     {
         const Geom& geom = scene.geoms[i];
+        if (counters && scene.cullBounds)
+        {
+            counters->boxTests++;
+        }
         if (scene.cullBounds
             && rayAABB(ray.origin, invDir, geom.worldBounds.min, geom.worldBounds.max, tBest) == FLT_MAX)
         {
@@ -349,7 +375,7 @@ __device__ inline void intersectScene(const SceneView& scene, const Ray& ray, Sh
         {
             int prim;
             glm::vec2 bary;
-            if (intersectMesh(scene, scene.meshes[geom.meshId], q, tBest, prim, bary, false))
+            if (intersectMesh(scene, scene.meshes[geom.meshId], q, tBest, prim, bary, false, counters))
             {
                 hitGeom = i;
                 hitPrim = prim;
