@@ -1,3 +1,4 @@
+#include "checkpoint.h"
 #include "glslUtility.hpp"
 #include "image.h"
 #include "pathtrace.h"
@@ -72,14 +73,20 @@ struct CommandLineOptions
     std::string statsFile;      // appends a CSV line of timing statistics
     bool savePfm = false;       // also write the raw linear average as .pfm
     bool saveFeatures = false;  // also write the albedo/normal denoiser features
+    bool saveState = false;     // headless: write a checkpoint at the end
+    int checkpointEvery = 0;    // headless: write a checkpoint every N iterations
     bool bvhOverride = false;   // BVH build settings given on the command line
     BVHBuildSettings bvh;
 };
 static CommandLineOptions options;
 
+static Checkpoint resumeState;
+static bool resuming = false;
+
 // Forward declarations for window loop and interactivity
 void runCuda();
 void saveImage();
+void saveState();
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
@@ -357,6 +364,11 @@ void RenderImGui()
         {
             saveImage();
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Save checkpoint (P)"))
+        {
+            saveState();
+        }
     }
 
     if (ImGui::CollapsingHeader("Profiling"))
@@ -444,7 +456,7 @@ static bool parseBool(const std::string& v)
 
 static void printUsage(const char* exe)
 {
-    printf("Usage: %s SCENEFILE.json [options]\n", exe);
+    printf("Usage: %s SCENEFILE.json|CHECKPOINT.ptstate [options]\n", exe);
     printf("  --headless          render without a window, save the image and exit\n");
     printf("  --spp N             number of iterations (overrides ITERATIONS)\n");
     printf("  --depth N           maximum path depth (overrides DEPTH)\n");
@@ -457,6 +469,9 @@ static void printUsage(const char* exe)
     printf("  --denoise 0|1       run Open Image Denoise on the final image (saved as *.denoised.png)\n");
     printf("  --denoise-aux 0|1, --denoise-prefilter 0|1   denoiser feature options\n");
     printf("  --save-features     also save the albedo and normal feature images\n");
+    printf("  --save-state        headless: save a checkpoint (*.ptstate) at the end\n");
+    printf("  --checkpoint N      headless: save a checkpoint every N iterations\n");
+    printf("Pass a .ptstate file instead of a scene to resume a saved render; its settings are restored.\n");
     printf("  --sort off|thrust|cub       sort paths by material before shading\n");
     printf("  --compact off|thrust|cub    stream compact terminated paths\n");
     printf("  --aa 0|1            stochastic sampled antialiasing\n");
@@ -505,6 +520,8 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--denoise-aux") settings.denoiseAux = parseBool(next());
         else if (arg == "--denoise-prefilter") settings.denoisePrefilter = parseBool(next());
         else if (arg == "--save-features") options.saveFeatures = true;
+        else if (arg == "--save-state") options.saveState = true;
+        else if (arg == "--checkpoint") options.checkpointEvery = std::stoi(next());
         else if (arg == "--sort")
         {
             std::string v = next();
@@ -633,11 +650,26 @@ int main(int argc, char** argv)
     }
     guiData->stats.warmupIterations = options.warmup;
 
-    // Load scene file
-    scene = new Scene(sceneFile, options.bvhOverride ? &options.bvh : nullptr);
-    if (options.resX > 0)
+    std::string sceneArg = sceneFile;
+    resuming = sceneArg.size() > 8 && sceneArg.substr(sceneArg.size() - 8) == ".ptstate";
+    if (resuming)
     {
-        scene->setResolution(options.resX, options.resY);
+        // Restore scene, settings and accumulation from a checkpoint.
+        scene = loadCheckpoint(sceneArg, resumeState);
+        if (!scene)
+        {
+            return 1;
+        }
+        guiData->settings = resumeState.settings;
+    }
+    else
+    {
+        // Load scene file
+        scene = new Scene(sceneFile, options.bvhOverride ? &options.bvh : nullptr);
+        if (options.resX > 0)
+        {
+            scene->setResolution(options.resX, options.resY);
+        }
     }
 
     // Set up camera stuff from loaded path tracer settings
@@ -657,6 +689,14 @@ int main(int argc, char** argv)
     zoom = glm::length(offset);
     theta = glm::acos(glm::clamp(offset.y / zoom, -1.0f, 1.0f));
     phi = glm::atan(offset.x, offset.z);
+    if (resuming)
+    {
+        zoom = resumeState.orbit.zoom;
+        theta = resumeState.orbit.theta;
+        phi = resumeState.orbit.phi;
+        cam.lookAt = resumeState.orbit.lookAt;
+        ogLookAt = resumeState.orbit.originalLookAt;
+    }
 
     InitImguiData(guiData);
     InitDataContainer(guiData);
@@ -666,12 +706,26 @@ int main(int argc, char** argv)
         updateCamera();
         pathtraceInit(scene);
         pathtraceResetImage();
-        for (iteration = 1; iteration <= (int)renderState->iterations; ++iteration)
+        int first = 1;
+        if (resuming)
+        {
+            pathtraceSetAccumulation(resumeState.image, resumeState.albedo, resumeState.normal);
+            first = resumeState.iteration + 1;
+        }
+        for (iteration = first; iteration <= (int)renderState->iterations; ++iteration)
         {
             pathtrace(NULL, 0, iteration);
+            if (options.checkpointEvery > 0 && iteration % options.checkpointEvery == 0)
+            {
+                saveState();
+            }
         }
-        iteration = renderState->iterations;
+        iteration = std::max((int)renderState->iterations, first - 1);
         saveImage();
+        if (options.saveState)
+        {
+            saveState();
+        }
         writeStats(sceneFile);
         pathtraceFree();
         return 0;
@@ -680,12 +734,41 @@ int main(int argc, char** argv)
     // Initialize CUDA and GL components
     init();
     pathtraceInit(scene);
+    if (resuming)
+    {
+        updateCamera();
+        camchanged = false;
+        pathtraceResetImage();
+        pathtraceSetAccumulation(resumeState.image, resumeState.albedo, resumeState.normal);
+        iteration = resumeState.iteration;
+    }
 
     // GLFW main loop
     mainLoop();
 
     pathtraceFree();
     return 0;
+}
+
+// Writes a checkpoint that can be passed back on the command line.
+void saveState()
+{
+    if (iteration <= 0)
+    {
+        return;
+    }
+    Checkpoint cp;
+    cp.iteration = iteration;
+    cp.settings = guiData->settings;
+    cp.orbit.zoom = zoom;
+    cp.orbit.theta = theta;
+    cp.orbit.phi = phi;
+    cp.orbit.lookAt = renderState->camera.lookAt;
+    cp.orbit.originalLookAt = ogLookAt;
+    pathtraceGetAccumulation(cp.image, cp.albedo, cp.normal);
+    std::ostringstream ss;
+    ss << renderState->imageName << "." << iteration << "samp.ptstate";
+    saveCheckpoint(ss.str(), *scene, cp);
 }
 
 void saveImage()
@@ -836,6 +919,9 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                 break;
             case GLFW_KEY_S:
                 saveImage();
+                break;
+            case GLFW_KEY_P:
+                saveState();
                 break;
             case GLFW_KEY_SPACE:
                 camchanged = true;

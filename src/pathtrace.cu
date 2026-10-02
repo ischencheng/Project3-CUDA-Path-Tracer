@@ -1289,6 +1289,37 @@ void pathtraceCopyFeaturesToHost(int iter, std::vector<glm::vec3>& albedo, std::
     }
 }
 
+void pathtraceGetAccumulation(std::vector<glm::vec3>& image, std::vector<glm::vec3>& albedo,
+    std::vector<glm::vec3>& normal)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const size_t pixelcount = (size_t)cam.resolution.x * cam.resolution.y;
+    image.resize(pixelcount);
+    albedo.resize(pixelcount);
+    normal.resize(pixelcount);
+    cudaMemcpy(image.data(), dev_image, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(albedo.data(), dev_albedo, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(normal.data(), dev_normal, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+}
+
+void pathtraceSetAccumulation(const std::vector<glm::vec3>& image, const std::vector<glm::vec3>& albedo,
+    const std::vector<glm::vec3>& normal)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const size_t pixelcount = (size_t)cam.resolution.x * cam.resolution.y;
+    if (image.size() == pixelcount)
+    {
+        cudaMemcpy(dev_image, image.data(), pixelcount * sizeof(glm::vec3), cudaMemcpyHostToDevice);
+    }
+    if (albedo.size() == pixelcount && normal.size() == pixelcount)
+    {
+        cudaMemcpy(dev_albedo, albedo.data(), pixelcount * sizeof(glm::vec3), cudaMemcpyHostToDevice);
+        cudaMemcpy(dev_normal, normal.data(), pixelcount * sizeof(glm::vec3), cudaMemcpyHostToDevice);
+    }
+    denoisedValid = false;
+    checkCUDAError("restore accumulation");
+}
+
 const char* pathtraceDenoiserName()
 {
     static std::string name;

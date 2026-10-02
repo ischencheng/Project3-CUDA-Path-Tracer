@@ -50,6 +50,7 @@ include_directories(${GLM_INCLUDE_DIRS})
 
 set(headers
     src/bvh.h
+    src/checkpoint.h
     src/denoiser.h
     src/image.h
     src/meshLoader.h
@@ -69,6 +70,7 @@ set(headers
 
 set(sources
     src/bvh.cpp
+    src/checkpoint.cpp
     src/denoiser.cpp
     src/main.cpp
     src/meshLoader.cpp

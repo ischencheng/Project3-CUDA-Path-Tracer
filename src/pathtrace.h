@@ -22,3 +22,9 @@ void pathtraceCopyDenoisedToHost(std::vector<glm::vec3>& out);
 // Copies the averaged albedo and normal features into the given vectors.
 void pathtraceCopyFeaturesToHost(int iteration, std::vector<glm::vec3>& albedo, std::vector<glm::vec3>& normal);
 const char* pathtraceDenoiserName();
+
+// Accumulation buffers (sums over iterations) for checkpoints.
+void pathtraceGetAccumulation(std::vector<glm::vec3>& image, std::vector<glm::vec3>& albedo,
+    std::vector<glm::vec3>& normal);
+void pathtraceSetAccumulation(const std::vector<glm::vec3>& image, const std::vector<glm::vec3>& albedo,
+    const std::vector<glm::vec3>& normal);

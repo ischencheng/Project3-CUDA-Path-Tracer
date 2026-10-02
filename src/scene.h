@@ -18,6 +18,7 @@ private:
     void loadEnvironmentMap(const std::string& file);
 public:
     Scene(std::string filename, const BVHBuildSettings* bvhOverride = nullptr);
+    Scene() = default;      // filled in by loadCheckpoint()
 
     // Changes the output resolution, keeping the vertical field of view.
     void setResolution(int width, int height);
