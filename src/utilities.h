@@ -50,6 +50,8 @@ enum SortMode
 struct RenderSettings
 {
     int sortMode = SORT_OFF;
+    bool wavefront = false;         // per-material queues instead of one shading kernel
+    int coherenceStartDepth = 0;    // sorting/queues only from this bounce on (earlier bounces are pixel-coherent)
     int compactionMode = COMPACT_CUB;
     bool antialiasing = true;
     bool motionBlur = true;         // sample a shutter time per path

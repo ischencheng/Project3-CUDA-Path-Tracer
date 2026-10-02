@@ -34,6 +34,10 @@
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
+
+// Wavefront path tracing: queue index used for paths that missed the scene.
+#define QUEUE_MISS MATERIAL_TYPE_COUNT
+#define QUEUE_COUNT (MATERIAL_TYPE_COUNT + 1)
 void checkCUDAErrorFn(const char* msg, const char* file, int line)
 {
 #if ERRORCHECK_SYNC
@@ -123,6 +127,9 @@ static int* dev_sortKeysAlt = NULL;
 static int* dev_sortIndices = NULL;
 static int* dev_sortIndicesAlt = NULL;
 static int* dev_numSelected = NULL;
+// Wavefront material queues
+static int* dev_queues = NULL;
+static int* dev_queueCounts = NULL;
 // Triangle meshes and their BVHs
 static MeshInfo* dev_meshes = NULL;
 static BVHNode* dev_bvhNodes = NULL;
@@ -389,6 +396,8 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_sortIndices, pixelcount * sizeof(int));
     cudaMalloc(&dev_sortIndicesAlt, pixelcount * sizeof(int));
     cudaMalloc(&dev_numSelected, sizeof(int));
+    cudaMalloc(&dev_queues, (size_t)QUEUE_COUNT * pixelcount * sizeof(int));
+    cudaMalloc(&dev_queueCounts, QUEUE_COUNT * sizeof(int));
 
     // Only as many key bits as needed to represent every material id plus the
     // "miss" key are sorted.
@@ -432,6 +441,10 @@ void pathtraceFree()
     cudaFree(dev_sortIndices);
     cudaFree(dev_sortIndicesAlt);
     cudaFree(dev_numSelected);
+    cudaFree(dev_queues);
+    cudaFree(dev_queueCounts);
+    dev_queues = NULL;
+    dev_queueCounts = NULL;
     cudaFree(dev_cubScratch);
     cudaFree(dev_meshes);
     cudaFree(dev_bvhNodes);
@@ -708,25 +721,18 @@ __device__ inline float bsdfHitWeight(const ShadeParams& p, const PathSegment& p
 // (next event estimation) and the BSDF, and spawns the continuation ray.
 // Paths that miss the scene, hit a light, or run out of bounces are marked as
 // terminated (remainingBounces = 0) so that they can be stream compacted away.
-__global__ void shadeMaterial(
-    ShadeParams params,
-    int num_paths,
-    const int* order,   // optional permutation (material-sorted indices)
+//
+// TYPE is a MaterialType when every path handed to this function is known to
+// hit that material type (wavefront queues): the BSDF switch statements then
+// fold away at compile time. TYPE = -1 handles any material (megakernel).
+template <int TYPE>
+__device__ inline void shadePath(
+    const ShadeParams& params,
+    int idx,
     const ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     ShadowRay* shadowRays)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_paths)
-    {
-        return;
-    }
-    if (order != NULL)
-    {
-        idx = order[idx];
-    }
-    shadowRays[idx].pixelIndex = -1;
-
     PathSegment path = pathSegments[idx];
     if (path.remainingBounces <= 0)
     {
@@ -736,14 +742,11 @@ __global__ void shadeMaterial(
     const int depth = params.depth;
     ShadeableIntersection intersection = shadeableIntersections[idx];
 
-    // Beer-Lambert absorption along the segment travelled inside a medium.
-    if (path.mediumMaterial >= 0 && intersection.t > 0.0f)
-    {
-        glm::vec3 sigma = params.scene.materials[path.mediumMaterial].absorption;
-        path.throughput *= glm::exp(-sigma * intersection.t);
-    }
+    // In the specialized queue kernels these are compile-time constants, so
+    // the miss and emitter kernels only contain their own small code paths.
+    const bool isMiss = TYPE == QUEUE_MISS || (TYPE < 0 && intersection.t <= 0.0f);
 
-    if (intersection.t <= 0.0f)
+    if (isMiss)
     {
         // The ray escaped the scene and sees the environment.
         if (params.env.enabled)
@@ -761,7 +764,15 @@ __global__ void shadeMaterial(
         return;
     }
 
+    // Beer-Lambert absorption along the segment travelled inside a medium.
+    if (path.mediumMaterial >= 0)
+    {
+        glm::vec3 sigma = params.scene.materials[path.mediumMaterial].absorption;
+        path.throughput *= glm::exp(-sigma * intersection.t);
+    }
+
     const Material material = params.scene.materials[intersection.materialId];
+    const bool isEmitter = TYPE >= 0 ? TYPE == MATERIAL_EMITTING : material.type == MATERIAL_EMITTING;
     SurfaceHit hit = computeSurfaceHit(params.scene, path.ray, intersection);
     glm::vec3 wo = -path.ray.direction;
     // Interpolated normals can face away from the viewer at silhouettes; fall
@@ -770,10 +781,18 @@ __global__ void shadeMaterial(
     {
         hit.shadingNormal = hit.normal;
     }
-    MaterialEval mat = evaluateMaterial(material, hit, params.scene.textures, wo);
-    if (material.type == MATERIAL_EMITTING)
+    MaterialEval mat;
+    if (isEmitter)
     {
         mat.emission = material.emission;
+    }
+    else
+    {
+        mat = evaluateMaterial(material, hit, params.scene.textures, wo);
+        if (TYPE >= 0 && TYPE < MATERIAL_TYPE_COUNT)
+        {
+            mat.bsdf.type = TYPE;
+        }
     }
 
     // Emission found by following the BSDF sample of the previous bounce.
@@ -795,7 +814,7 @@ __global__ void shadeMaterial(
         float w = bsdfHitWeight(params, path, lightPdf);
         addToImage(params.image, path.pixelIndex, path.throughput * mat.emission * w);
     }
-    if (material.type == MATERIAL_EMITTING)
+    if (isEmitter)
     {
         recordFeatures(params, path, mat.emission, hit.normal);
         pathSegments[idx].remainingBounces = 0;
@@ -918,6 +937,78 @@ __global__ void shadeMaterial(
     pathSegments[idx] = path;
 }
 
+// Megakernel: shades every path whatever its material.
+__global__ void shadeMaterial(
+    ShadeParams params,
+    int num_paths,
+    const int* order,   // optional permutation (material-sorted indices)
+    const ShadeableIntersection* shadeableIntersections,
+    PathSegment* pathSegments,
+    ShadowRay* shadowRays)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths)
+    {
+        return;
+    }
+    if (order != NULL)
+    {
+        idx = order[idx];
+    }
+    shadowRays[idx].pixelIndex = -1;
+    shadePath<-1>(params, idx, shadeableIntersections, pathSegments, shadowRays);
+}
+
+// Appends every live path to the queue of the material type it hit. Lanes of
+// a warp that go to the same queue reserve their slots with one atomic.
+__global__ void classifyPaths(int num_paths, const PathSegment* paths, const ShadeableIntersection* isects,
+    const Material* materials, int* queues, int capacity, int* counts, ShadowRay* shadowRays)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths)
+    {
+        return;
+    }
+    shadowRays[idx].pixelIndex = -1;
+    if (paths[idx].remainingBounces <= 0)
+    {
+        return;
+    }
+    const ShadeableIntersection& isect = isects[idx];
+    int queue = isect.t > 0.0f ? materials[isect.materialId].type : QUEUE_MISS;
+
+    unsigned int active = __activemask();
+    unsigned int peers = __match_any_sync(active, queue);
+    int lane = threadIdx.x & 31;
+    int leader = __ffs(peers) - 1;
+    int rank = __popc(peers & ((1u << lane) - 1u));
+    int base = 0;
+    if (lane == leader)
+    {
+        base = atomicAdd(&counts[queue], __popc(peers));
+    }
+    base = __shfl_sync(peers, base, leader);
+    queues[queue * capacity + base + rank] = idx;
+}
+
+// Shades the paths of one queue with a kernel specialized for its material.
+template <int TYPE>
+__global__ void shadeQueue(
+    ShadeParams params,
+    const int* queue,
+    int count,
+    const ShadeableIntersection* shadeableIntersections,
+    PathSegment* pathSegments,
+    ShadowRay* shadowRays)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count)
+    {
+        return;
+    }
+    shadePath<TYPE>(params, queue[i], shadeableIntersections, pathSegments, shadowRays);
+}
+
 // Traces the shadow rays queued by the shading kernel and adds the light
 // contribution of the unoccluded ones.
 __global__ void traceShadowRays(int num_paths, const ShadowRay* shadowRays, SceneView scene, glm::vec3* image)
@@ -963,6 +1054,42 @@ static inline void stageEnd(bool profile, RenderStage stage)
             guiData->stats.stageMs[stage] += ms;
         }
     }
+}
+
+template <int TYPE>
+static void launchQueue(const ShadeParams& params, const int* counts, int capacity, int blockSize)
+{
+    int count = counts[TYPE];
+    if (count > 0)
+    {
+        shadeQueue<TYPE><<<(count + blockSize - 1) / blockSize, blockSize>>>(
+            params, dev_queues + (size_t)TYPE * capacity, count, dev_intersections, dev_paths, dev_shadowRays);
+    }
+}
+
+// Wavefront shading: bucket paths by material type, then run one specialized
+// kernel per non-empty bucket. The classification counts as sorting time.
+static void shadeWavefront(const ShadeParams& params, int num_paths, int blockSize, bool profile)
+{
+    const int capacity = hst_scene->state.camera.resolution.x * hst_scene->state.camera.resolution.y;
+    stageBegin(profile);
+    cudaMemsetAsync(dev_queueCounts, 0, QUEUE_COUNT * sizeof(int));
+    classifyPaths<<<(num_paths + blockSize - 1) / blockSize, blockSize>>>(num_paths, dev_paths, dev_intersections,
+        dev_materials, dev_queues, capacity, dev_queueCounts, dev_shadowRays);
+    int counts[QUEUE_COUNT];
+    cudaMemcpy(counts, dev_queueCounts, sizeof(counts), cudaMemcpyDeviceToHost);
+    checkCUDAError("classify paths");
+    stageEnd(profile, STAGE_SORT);
+
+    stageBegin(profile);
+    launchQueue<MATERIAL_DIFFUSE>(params, counts, capacity, blockSize);
+    launchQueue<MATERIAL_SPECULAR>(params, counts, capacity, blockSize);
+    launchQueue<MATERIAL_DIELECTRIC>(params, counts, capacity, blockSize);
+    launchQueue<MATERIAL_PBR>(params, counts, capacity, blockSize);
+    launchQueue<MATERIAL_EMITTING>(params, counts, capacity, blockSize);
+    launchQueue<QUEUE_MISS>(params, counts, capacity, blockSize);
+    checkCUDAError("shade queues");
+    stageEnd(profile, STAGE_SHADE);
 }
 
 // Reorders paths (and their intersections) so that equal materials are
@@ -1125,14 +1252,14 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // path segments that have been reshuffled to be contiguous in memory.
 
         const int* shadeOrder = NULL;
-        if (settings.sortMode != SORT_OFF)
+        const bool regroup = depth >= settings.coherenceStartDepth;
+        if (settings.sortMode != SORT_OFF && !settings.wavefront && regroup)
         {
             stageBegin(profile);
             shadeOrder = sortPathsByMaterial(settings.sortMode, num_paths, blockSize1d);
             stageEnd(profile, STAGE_SORT);
         }
 
-        stageBegin(profile);
         ShadeParams shadeParams;
         shadeParams.iter = iter;
         shadeParams.depth = depth;
@@ -1143,16 +1270,24 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeParams.image = dev_image;
         shadeParams.aovAlbedo = dev_albedo;
         shadeParams.aovNormal = dev_normal;
-        shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
-            shadeParams,
-            num_paths,
-            shadeOrder,
-            dev_intersections,
-            dev_paths,
-            dev_shadowRays
-        );
-        checkCUDAError("shade");
-        stageEnd(profile, STAGE_SHADE);
+        if (settings.wavefront && regroup)
+        {
+            shadeWavefront(shadeParams, num_paths, blockSize1d, profile);
+        }
+        else
+        {
+            stageBegin(profile);
+            shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                shadeParams,
+                num_paths,
+                shadeOrder,
+                dev_intersections,
+                dev_paths,
+                dev_shadowRays
+            );
+            checkCUDAError("shade");
+            stageEnd(profile, STAGE_SHADE);
+        }
 
         if (settings.nextEventEstimation)
         {

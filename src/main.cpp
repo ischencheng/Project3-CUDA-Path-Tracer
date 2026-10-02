@@ -308,7 +308,12 @@ void RenderImGui()
         const char* compactModes[COMPACT_MODE_COUNT] = { "Off", "thrust::remove_if", "CUB select (ping-pong)" };
         const char* sortModes[SORT_MODE_COUNT] = { "Off", "thrust::sort_by_key", "CUB radix + gather", "CUB radix, indirect" };
         resetNeeded |= ImGui::Combo("Stream compaction", &settings.compactionMode, compactModes, COMPACT_MODE_COUNT);
-        resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
+        resetNeeded |= ImGui::Checkbox("Wavefront material queues", &settings.wavefront);
+        resetNeeded |= ImGui::SliderInt("Regroup from bounce", &settings.coherenceStartDepth, 0, 8);
+        if (!settings.wavefront)
+        {
+            resetNeeded |= ImGui::Combo("Material sort", &settings.sortMode, sortModes, SORT_MODE_COUNT);
+        }
         const char* samplers[] = { "Random (hashed)", "Sobol (Owen scrambled)" };
         resetNeeded |= ImGui::Combo("Sampler", &settings.samplerType, samplers, 2);
         resetNeeded |= ImGui::Checkbox("Stochastic antialiasing", &settings.antialiasing);
@@ -478,6 +483,8 @@ static void printUsage(const char* exe)
     printf("  --motion 0|1        motion blur (objects with MOTION move during the exposure)\n");
     printf("  --rr 0|1            russian roulette path termination, --rr-depth N first bounce\n");
     printf("  --nee 0|1           next event estimation (direct light sampling)\n");
+    printf("  --wavefront 0|1     shade with per-material queues and specialized kernels\n");
+    printf("  --regroup-depth N   sort/queue paths only from bounce N on\n");
     printf("  --sampler random|sobol  random numbers for all sample dimensions\n");
     printf("  --mis 0|1           multiple importance sampling of light and BSDF samples\n");
     printf("  --bvh 0|1           traverse mesh BVHs (0 = test every triangle)\n");
@@ -538,6 +545,8 @@ static bool parseCommandLine(int argc, char** argv, RenderSettings& settings, Re
         else if (arg == "--motion") settings.motionBlur = parseBool(next());
         else if (arg == "--rr") settings.russianRoulette = parseBool(next());
         else if (arg == "--nee") settings.nextEventEstimation = parseBool(next());
+        else if (arg == "--wavefront") settings.wavefront = parseBool(next());
+        else if (arg == "--regroup-depth") settings.coherenceStartDepth = std::stoi(next());
         else if (arg == "--sampler") settings.samplerType = next() == "random" ? 0 : 1;
         else if (arg == "--mis") settings.multipleImportance = parseBool(next());
         else if (arg == "--rr-depth") settings.rrStartDepth = std::stoi(next());
@@ -596,7 +605,7 @@ static void writeStats(const char* sceneFile)
     out << sceneFile << "," << renderState->imageName << "," << iteration << "," << renderState->traceDepth
         << "," << s.compactionMode << "," << s.sortMode << "," << s.antialiasing
         << "," << s.russianRoulette << "," << s.useBVH << "," << s.cullBounds
-        << "," << s.nextEventEstimation << "," << s.multipleImportance << "," << s.samplerType
+        << "," << s.nextEventEstimation << "," << s.multipleImportance << "," << s.samplerType << "," << s.wavefront
         << "," << stats.avgIterationMs();
     for (int st = 0; st < STAGE_COUNT; ++st)
     {
