@@ -1,0 +1,9 @@
+scene,mode,ms,Generate,Intersect,Sort,Shade,Compact,Shadow
+cornell_open,off,30.466,1.274,6.937,0.0,17.906,0.0,4.648
+cornell_open,thrust::remove_if (every bounce),25.849,1.266,4.014,0.0,10.562,7.313,2.72
+cornell_open,CUB select (every bounce),25.575,1.261,3.969,0.0,10.6,7.326,2.751
+cornell_open,"CUB select (adaptive, <= 60% alive)",21.769,1.311,4.304,0.0,11.316,2.156,2.993
+cornell_closed,off,40.324,1.37,8.515,0.0,24.17,0.0,6.272
+cornell_closed,thrust::remove_if (every bounce),56.0,1.324,8.639,0.0,22.832,18.355,5.84
+cornell_closed,CUB select (every bounce),55.461,1.336,7.975,0.0,22.86,18.826,5.848
+cornell_closed,"CUB select (adaptive, <= 60% alive)",41.888,1.427,8.754,0.0,24.288,1.081,6.279

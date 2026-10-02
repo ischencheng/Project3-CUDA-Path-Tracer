@@ -1,0 +1,7 @@
+scene,strategy,ms
+veach_mis,BSDF sampling,5.689
+veach_mis,light sampling (NEE),7.189
+veach_mis,MIS,7.16
+cornell,BSDF sampling,9.271
+cornell,light sampling (NEE),11.877
+cornell,MIS,11.961

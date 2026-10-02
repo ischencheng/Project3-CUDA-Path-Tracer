@@ -1,0 +1,23 @@
+triangles,mode,ms
+256,BVH + AABB culling,1.213
+256,BVH,1.23
+256,AABB culling only,2.003
+256,brute force,2.698
+1024,BVH + AABB culling,1.325
+1024,BVH,1.302
+1024,AABB culling only,5.987
+1024,brute force,9.497
+4096,BVH + AABB culling,1.619
+4096,BVH,1.65
+4096,AABB culling only,20.888
+4096,brute force,37.888
+16384,BVH + AABB culling,1.624
+16384,BVH,1.784
+16384,AABB culling only,73.963
+16384,brute force,134.916
+65536,BVH + AABB culling,1.875
+65536,BVH,1.877
+262144,BVH + AABB culling,2.352
+262144,BVH,2.126
+1048576,BVH + AABB culling,2.697
+1048576,BVH,2.541

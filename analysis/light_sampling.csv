@@ -1,0 +1,25 @@
+scene,strategy,spp,rmse
+veach_mis,BSDF sampling,4,0.4682759642601013
+veach_mis,BSDF sampling,16,0.1891620010137558
+veach_mis,BSDF sampling,64,0.08876970410346985
+veach_mis,BSDF sampling,256,0.040417835116386414
+veach_mis,light sampling (NEE),4,0.5168977975845337
+veach_mis,light sampling (NEE),16,0.2424764186143875
+veach_mis,light sampling (NEE),64,0.10477014631032944
+veach_mis,light sampling (NEE),256,0.05913397669792175
+veach_mis,MIS,4,0.24485769867897034
+veach_mis,MIS,16,0.07719704508781433
+veach_mis,MIS,64,0.04031309485435486
+veach_mis,MIS,256,0.01570950262248516
+cornell,BSDF sampling,4,0.327778697013855
+cornell,BSDF sampling,16,0.15616634488105774
+cornell,BSDF sampling,64,0.07258109003305435
+cornell,BSDF sampling,256,0.03368512541055679
+cornell,light sampling (NEE),4,1.8265188932418823
+cornell,light sampling (NEE),16,0.5010585784912109
+cornell,light sampling (NEE),64,0.22980564832687378
+cornell,light sampling (NEE),256,0.13720162212848663
+cornell,MIS,4,0.13718076050281525
+cornell,MIS,16,0.06475286930799484
+cornell,MIS,64,0.031041529029607773
+cornell,MIS,256,0.0148853100836277

@@ -1,0 +1,17 @@
+scene,threshold,ms
+cornell_open,1.0,26.012
+cornell_open,0.95,24.635
+cornell_open,0.9,24.761
+cornell_open,0.8,22.303
+cornell_open,0.7,22.079
+cornell_open,0.6,21.903
+cornell_open,0.5,22.222
+cornell_open,0.4,22.683
+cornell_closed,1.0,55.859
+cornell_closed,0.95,44.174
+cornell_closed,0.9,42.594
+cornell_closed,0.8,42.381
+cornell_closed,0.7,42.11
+cornell_closed,0.6,42.249
+cornell_closed,0.5,41.965
+cornell_closed,0.4,42.307
