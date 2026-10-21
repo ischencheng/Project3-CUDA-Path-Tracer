@@ -174,6 +174,10 @@ __global__ void computeIntersections(
     if (path_index < num_paths)
     {
         PathSegment pathSegment = pathSegments[path_index];
+        if (pathSegment.remainingBounces <= 0)
+        {
+            return;
+        }
 
         float t;
         glm::vec3 intersect_point;
@@ -280,6 +284,56 @@ __global__ void shadeFakeMaterial(
     }
 }
 
+__global__ void shadeMaterial(
+    int iter,
+    int depth,
+    int num_paths,
+    ShadeableIntersection* shadeableIntersections,
+    PathSegment* pathSegments,
+    Material* materials)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths)
+    {
+        return;
+    }
+
+    PathSegment path = pathSegments[idx];
+    if (path.remainingBounces <= 0)
+    {
+        return;
+    }
+
+    ShadeableIntersection intersection = shadeableIntersections[idx];
+    if (intersection.t < 0.0f)
+    {
+        // escaped the scene
+        path.color = glm::vec3(0.0f);
+        path.remainingBounces = 0;
+    }
+    else
+    {
+        Material material = materials[intersection.materialId];
+        if (material.emittance > 0.0f)
+        {
+            path.color *= material.color * material.emittance;
+            path.remainingBounces = 0;
+        }
+        else
+        {
+            thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, depth);
+            glm::vec3 p = path.ray.origin + intersection.t * path.ray.direction;
+            scatterRay(path, p, intersection.surfaceNormal, material, rng);
+            if (path.remainingBounces == 0)
+            {
+                // out of bounces before reaching a light
+                path.color = glm::vec3(0.0f);
+            }
+        }
+    }
+    pathSegments[idx] = path;
+}
+
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
 {
@@ -381,14 +435,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // TODO: compare between directly shading the path segments and shading
         // path segments that have been reshuffled to be contiguous in memory.
 
-        shadeFakeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
+        shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
+            depth,
             num_paths,
             dev_intersections,
             dev_paths,
             dev_materials
         );
-        iterationComplete = true; // TODO: should be based off stream compaction results.
+        checkCUDAError("shade one bounce");
+        iterationComplete = depth >= traceDepth; // TODO: should be based off stream compaction results.
 
         if (guiData != NULL)
         {
