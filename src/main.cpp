@@ -17,6 +17,7 @@
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -34,6 +35,9 @@ static double lastX;
 static double lastY;
 
 static bool camchanged = true;
+static bool headless = false;
+static int warmupIterations = 10;
+static double timedMs = 0.0;
 static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
@@ -344,7 +348,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N]\n", argv[0]);
         return 1;
     }
 
@@ -352,6 +356,23 @@ int main(int argc, char** argv)
 
     // Load scene file
     scene = new Scene(sceneFile);
+
+    for (int i = 2; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if (arg == "--headless")
+        {
+            headless = true;
+        }
+        else if (arg == "--spp" && i + 1 < argc)
+        {
+            scene->state.iterations = atoi(argv[++i]);
+        }
+        else if (arg == "--warmup" && i + 1 < argc)
+        {
+            warmupIterations = atoi(argv[++i]);
+        }
+    }
 
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();
@@ -379,6 +400,16 @@ int main(int argc, char** argv)
     ogLookAt = cam.lookAt;
     zoom = glm::length(cam.position - ogLookAt);
 
+    if (headless)
+    {
+        // no window, runCuda exits after the last iteration
+        InitDataContainer(guiData);
+        while (true)
+        {
+            runCuda();
+        }
+    }
+
     // Initialize CUDA and GL components
     init();
 
@@ -394,6 +425,7 @@ int main(int argc, char** argv)
 
 void saveImage()
 {
+    pathtraceDownloadImage();
     float samples = iteration;
     // output image file
     Image img(width, height);
@@ -439,6 +471,7 @@ void runCuda()
         cameraPosition += cam.lookAt;
         cam.position = cameraPosition;
         camchanged = false;
+        timedMs = 0.0;
     }
 
     // Map OpenGL buffer object for writing from CUDA on a single GPU
@@ -454,17 +487,35 @@ void runCuda()
     {
         uchar4* pbo_dptr = NULL;
         iteration++;
-        cudaGLMapBufferObject((void**)&pbo_dptr, pbo);
+        if (!headless)
+        {
+            cudaGLMapBufferObject((void**)&pbo_dptr, pbo);
+        }
 
         // execute the kernel
         int frame = 0;
+        auto start = std::chrono::high_resolution_clock::now();
         pathtrace(pbo_dptr, frame, iteration);
+        cudaDeviceSynchronize();
+        auto end = std::chrono::high_resolution_clock::now();
+        if (iteration > warmupIterations)
+        {
+            timedMs += std::chrono::duration<double, std::milli>(end - start).count();
+        }
 
         // unmap buffer object
-        cudaGLUnmapBufferObject(pbo);
+        if (!headless)
+        {
+            cudaGLUnmapBufferObject(pbo);
+        }
     }
     else
     {
+        int timed = iteration - warmupIterations;
+        if (timed > 0)
+        {
+            printf("Average %.3f ms per iteration over %d iterations\n", timedMs / timed, timed);
+        }
         saveImage();
         pathtraceFree();
         cudaDeviceReset();
