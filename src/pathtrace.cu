@@ -5,7 +5,9 @@
 #include <cmath>
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
+#include <thrust/gather.h>
 #include <thrust/remove.h>
+#include <thrust/sort.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -80,6 +82,10 @@ static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
+static int* dev_materialKeys = NULL;
+static int* dev_sortIndices = NULL;
+static PathSegment* dev_pathsSorted = NULL;
+static ShadeableIntersection* dev_intersectionsSorted = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -90,6 +96,17 @@ struct IsDead
         return path.remainingBounces <= 0;
     }
 };
+
+__global__ void getMaterialKeys(int num_paths, ShadeableIntersection* intersections, int* keys, int* indices)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_paths)
+    {
+        // misses and dead paths all get -1
+        keys[idx] = intersections[idx].t > 0.0f ? intersections[idx].materialId : -1;
+        indices[idx] = idx;
+    }
+}
 
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
@@ -118,6 +135,10 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    cudaMalloc(&dev_materialKeys, pixelcount * sizeof(int));
+    cudaMalloc(&dev_sortIndices, pixelcount * sizeof(int));
+    cudaMalloc(&dev_pathsSorted, pixelcount * sizeof(PathSegment));
+    cudaMalloc(&dev_intersectionsSorted, pixelcount * sizeof(ShadeableIntersection));
 
     checkCUDAError("pathtraceInit");
 }
@@ -130,6 +151,10 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
+    cudaFree(dev_materialKeys);
+    cudaFree(dev_sortIndices);
+    cudaFree(dev_pathsSorted);
+    cudaFree(dev_intersectionsSorted);
 
     checkCUDAError("pathtraceFree");
 }
@@ -438,6 +463,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // materials you have in the scenefile.
         // TODO: compare between directly shading the path segments and shading
         // path segments that have been reshuffled to be contiguous in memory.
+        if (guiData != NULL && guiData->SortByMaterial)
+        {
+            // sort small (key, index) pairs, then move each big struct only once
+            getMaterialKeys<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_intersections, dev_materialKeys, dev_sortIndices);
+            thrust::sort_by_key(thrust::device, dev_materialKeys, dev_materialKeys + num_paths, dev_sortIndices);
+            thrust::gather(thrust::device, dev_sortIndices, dev_sortIndices + num_paths, dev_paths, dev_pathsSorted);
+            thrust::gather(thrust::device, dev_sortIndices, dev_sortIndices + num_paths, dev_intersections, dev_intersectionsSorted);
+            std::swap(dev_paths, dev_pathsSorted);
+            std::swap(dev_intersections, dev_intersectionsSorted);
+        }
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
