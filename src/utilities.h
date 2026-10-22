@@ -18,8 +18,9 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0) {}
+    GuiDataContainer() : TracedDepth(0), StreamCompaction(true) {}
     int TracedDepth;
+    bool StreamCompaction;
 };
 
 namespace utilityCore

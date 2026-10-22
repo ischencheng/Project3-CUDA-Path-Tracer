@@ -83,6 +83,14 @@ static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
+struct IsDead
+{
+    __host__ __device__ bool operator()(const PathSegment& path) const
+    {
+        return path.remainingBounces <= 0;
+    }
+};
+
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
     guiData = imGuiData;
@@ -290,7 +298,8 @@ __global__ void shadeMaterial(
     int num_paths,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
-    Material* materials)
+    Material* materials,
+    glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -308,7 +317,6 @@ __global__ void shadeMaterial(
     if (intersection.t < 0.0f)
     {
         // escaped the scene
-        path.color = glm::vec3(0.0f);
         path.remainingBounces = 0;
     }
     else
@@ -316,7 +324,8 @@ __global__ void shadeMaterial(
         Material material = materials[intersection.materialId];
         if (material.emittance > 0.0f)
         {
-            path.color *= material.color * material.emittance;
+            // one path per pixel, so no atomics needed
+            image[path.pixelIndex] += path.color * material.color * material.emittance;
             path.remainingBounces = 0;
         }
         else
@@ -324,11 +333,6 @@ __global__ void shadeMaterial(
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, depth);
             glm::vec3 p = path.ray.origin + intersection.t * path.ray.direction;
             scatterRay(path, p, intersection.surfaceNormal, material, rng);
-            if (path.remainingBounces == 0)
-            {
-                // out of bounces before reaching a light
-                path.color = glm::vec3(0.0f);
-            }
         }
     }
     pathSegments[idx] = path;
@@ -441,20 +445,28 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             num_paths,
             dev_intersections,
             dev_paths,
-            dev_materials
+            dev_materials,
+            dev_image
         );
         checkCUDAError("shade one bounce");
-        iterationComplete = depth >= traceDepth; // TODO: should be based off stream compaction results.
+
+        if (guiData != NULL && guiData->StreamCompaction)
+        {
+            // dead paths already added their color to the image
+            PathSegment* alive_end = thrust::remove_if(thrust::device, dev_paths, dev_paths + num_paths, IsDead());
+            num_paths = alive_end - dev_paths;
+            if (iter == 1)
+            {
+                printf("depth %d: %d paths left\n", depth, num_paths);
+            }
+        }
+        iterationComplete = depth >= traceDepth || num_paths == 0; // TODO: should be based off stream compaction results.
 
         if (guiData != NULL)
         {
             guiData->TracedDepth = depth;
         }
     }
-
-    // Assemble this iteration and apply it to the image
-    dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-    finalGather<<<numBlocksPixels, blockSize1d>>>(num_paths, dev_image, dev_paths);
 
     ///////////////////////////////////////////////////////////////////////////
 

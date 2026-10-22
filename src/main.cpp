@@ -289,6 +289,7 @@ void RenderImGui()
     //ImGui::SameLine();
     //ImGui::Text("counter = %d", counter);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+    ImGui::Checkbox("Stream compaction", &imguiData->StreamCompaction);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -348,7 +349,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N]\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact]\n", argv[0]);
         return 1;
     }
 
@@ -356,6 +357,9 @@ int main(int argc, char** argv)
 
     // Load scene file
     scene = new Scene(sceneFile);
+
+    //Create Instance for ImGUIData
+    guiData = new GuiDataContainer();
 
     for (int i = 2; i < argc; i++)
     {
@@ -372,10 +376,11 @@ int main(int argc, char** argv)
         {
             warmupIterations = atoi(argv[++i]);
         }
+        else if (arg == "--no-compact")
+        {
+            guiData->StreamCompaction = false;
+        }
     }
-
-    //Create Instance for ImGUIData
-    guiData = new GuiDataContainer();
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;
