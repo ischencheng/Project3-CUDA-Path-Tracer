@@ -87,6 +87,7 @@ static int* dev_sortIndices = NULL;
 static PathSegment* dev_pathsSorted = NULL;
 static ShadeableIntersection* dev_intersectionsSorted = NULL;
 static Triangle* dev_triangles = NULL;
+static BVHNode* dev_bvh = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -143,6 +144,8 @@ void pathtraceInit(Scene* scene)
 
     cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(Triangle));
     cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
+    cudaMalloc(&dev_bvh, scene->bvh.size() * sizeof(BVHNode));
+    cudaMemcpy(dev_bvh, scene->bvh.data(), scene->bvh.size() * sizeof(BVHNode), cudaMemcpyHostToDevice);
 
     checkCUDAError("pathtraceInit");
 }
@@ -160,6 +163,7 @@ void pathtraceFree()
     cudaFree(dev_pathsSorted);
     cudaFree(dev_intersectionsSorted);
     cudaFree(dev_triangles);
+    cudaFree(dev_bvh);
 
     checkCUDAError("pathtraceFree");
 }
@@ -210,30 +214,9 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
-// closest triangle of one mesh, -1 if nothing is closer than tMax
-__device__ float meshIntersectionTest(
-    const Geom& mesh,
-    const Triangle* triangles,
-    const Ray& r,
-    float tMax,
-    bool boxCulling,
-    glm::vec3& normal,
-    bool& outside,
-    int& materialId)
+__device__ void intersectTriangles(const Triangle* triangles, int begin, int end, const Ray& r, float& tMax, int& hit, glm::vec2& hitBary)
 {
-    if (boxCulling)
-    {
-        // skip all the triangles if the ray misses the box
-        float tBox = boundingBoxIntersectionTest(mesh.bboxMin, mesh.bboxMax, r, 1.0f / r.direction);
-        if (tBox < 0.0f || tBox > tMax)
-        {
-            return -1.0f;
-        }
-    }
-
-    int hit = -1;
-    glm::vec2 hitBary;
-    for (int i = mesh.triStart; i < mesh.triStart + mesh.triCount; i++)
+    for (int i = begin; i < end; i++)
     {
         glm::vec2 bary;
         float t = triangleIntersectionTest(triangles[i], r, bary);
@@ -243,6 +226,74 @@ __device__ float meshIntersectionTest(
             hit = i;
             hitBary = bary;
         }
+    }
+}
+
+// closest triangle of one mesh, -1 if nothing is closer than tMax
+__device__ float meshIntersectionTest(
+    const Geom& mesh,
+    const Triangle* triangles,
+    const BVHNode* bvh,
+    const Ray& r,
+    float tMax,
+    bool boxCulling,
+    bool useBVH,
+    glm::vec3& normal,
+    bool& outside,
+    int& materialId)
+{
+    glm::vec3 invDir = 1.0f / r.direction;
+    if (boxCulling || useBVH)
+    {
+        // skip all the triangles if the ray misses the box
+        float tBox = boundingBoxIntersectionTest(mesh.bboxMin, mesh.bboxMax, r, invDir);
+        if (tBox < 0.0f || tBox > tMax)
+        {
+            return -1.0f;
+        }
+    }
+
+    int hit = -1;
+    glm::vec2 hitBary;
+    if (useBVH)
+    {
+        // no recursion on the gpu, so keep a small stack of nodes to visit
+        int stack[64];
+        int top = 0;
+        stack[top++] = mesh.bvhRoot;
+        while (top > 0)
+        {
+            const BVHNode& node = bvh[stack[--top]];
+            if (node.count > 0)
+            {
+                intersectTriangles(triangles, node.start, node.start + node.count, r, tMax, hit, hitBary);
+                continue;
+            }
+            int left = node.start;
+            int right = node.start + 1;
+            float tLeft = boundingBoxIntersectionTest(bvh[left].bboxMin, bvh[left].bboxMax, r, invDir);
+            float tRight = boundingBoxIntersectionTest(bvh[right].bboxMin, bvh[right].bboxMax, r, invDir);
+            bool hitLeft = tLeft >= 0.0f && tLeft < tMax;
+            bool hitRight = tRight >= 0.0f && tRight < tMax;
+            if (hitLeft && hitRight)
+            {
+                // nearer child goes on top so tMax shrinks sooner
+                stack[top++] = tLeft < tRight ? right : left;
+                stack[top++] = tLeft < tRight ? left : right;
+            }
+            else if (hitLeft)
+            {
+                stack[top++] = left;
+            }
+            else if (hitRight)
+            {
+                stack[top++] = right;
+            }
+        }
+    }
+    else
+    {
+        intersectTriangles(triangles, mesh.triStart, mesh.triStart + mesh.triCount, r, tMax, hit, hitBary);
     }
     if (hit < 0)
     {
@@ -276,7 +327,9 @@ __global__ void computeIntersections(
     Geom* geoms,
     int geoms_size,
     Triangle* triangles,
+    BVHNode* bvh,
     bool boxCulling,
+    bool useBVH,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -319,7 +372,7 @@ __global__ void computeIntersections(
             }
             else if (geom.type == MESH)
             {
-                t = meshIntersectionTest(geom, triangles, pathSegment.ray, t_min, boxCulling, tmp_normal, tmp_outside, tmp_material);
+                t = meshIntersectionTest(geom, triangles, bvh, pathSegment.ray, t_min, boxCulling, useBVH, tmp_normal, tmp_outside, tmp_material);
             }
             // TODO: add more intersection tests here... triangle? metaball? CSG?
 
@@ -554,7 +607,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_geoms,
             hst_scene->geoms.size(),
             dev_triangles,
+            dev_bvh,
             guiData == NULL || guiData->BoundingBoxCulling,
+            guiData == NULL || guiData->UseBVH,
             dev_intersections
         );
         checkCUDAError("trace one bounce");

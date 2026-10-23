@@ -37,6 +37,18 @@ struct Geom
     int triCount;
     glm::vec3 bboxMin;
     glm::vec3 bboxMax;
+    int bvhRoot;
+};
+
+// the two children of an interior node sit next to each other
+struct BVHNode
+{
+    glm::vec3 bboxMin;
+    // leaf: first triangle, interior: left child
+    int start;
+    glm::vec3 bboxMax;
+    // 0 for interior nodes
+    int count;
 };
 
 // already in world space

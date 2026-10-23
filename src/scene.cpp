@@ -304,3 +304,120 @@ void Scene::loadGLTF(const std::string& file, const glm::mat4& transform, int ma
         }
     }
 }
+
+void Scene::buildBVH(int maxLeafSize)
+{
+    // one tree per mesh, built on the cpu
+    bvh.clear();
+    for (Geom& geom : geoms)
+    {
+        if (geom.type == MESH)
+        {
+            geom.bvhRoot = bvh.size();
+            bvh.push_back({});
+            buildNode(geom.bvhRoot, geom.triStart, geom.triCount, maxLeafSize, 0);
+        }
+    }
+    cout << "BVH has " << bvh.size() << " nodes" << endl;
+}
+
+static float surfaceArea(const glm::vec3& bmin, const glm::vec3& bmax)
+{
+    glm::vec3 d = bmax - bmin;
+    return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
+}
+
+void Scene::buildNode(int node, int start, int count, int maxLeafSize, int depth)
+{
+    glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX), cmin(FLT_MAX), cmax(-FLT_MAX);
+    for (int i = start; i < start + count; i++)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            bmin = glm::min(bmin, triangles[i].v[k]);
+            bmax = glm::max(bmax, triangles[i].v[k]);
+        }
+        glm::vec3 c = (triangles[i].v[0] + triangles[i].v[1] + triangles[i].v[2]) / 3.0f;
+        cmin = glm::min(cmin, c);
+        cmax = glm::max(cmax, c);
+    }
+    bvh[node] = { bmin, start, bmax, count };
+
+    // split along the longest axis of the centroid box
+    glm::vec3 extent = cmax - cmin;
+    int axis = extent.x > extent.y ? (extent.x > extent.z ? 0 : 2) : (extent.y > extent.z ? 1 : 2);
+    if (count <= maxLeafSize || depth >= 40 || extent[axis] < 1e-6f)
+    {
+        return;
+    }
+
+    // binned SAH: drop centroids into bins, then try every split between two bins
+    const int BINS = 16;
+    auto binOf = [&](const Triangle& tri)
+    {
+        float c = (tri.v[0][axis] + tri.v[1][axis] + tri.v[2][axis]) / 3.0f;
+        return std::min((int)((c - cmin[axis]) / extent[axis] * BINS), BINS - 1);
+    };
+    glm::vec3 binMin[BINS], binMax[BINS];
+    int binCount[BINS] = {};
+    for (int b = 0; b < BINS; b++)
+    {
+        binMin[b] = glm::vec3(FLT_MAX);
+        binMax[b] = glm::vec3(-FLT_MAX);
+    }
+    for (int i = start; i < start + count; i++)
+    {
+        int b = binOf(triangles[i]);
+        binCount[b]++;
+        for (int k = 0; k < 3; k++)
+        {
+            binMin[b] = glm::min(binMin[b], triangles[i].v[k]);
+            binMax[b] = glm::max(binMax[b], triangles[i].v[k]);
+        }
+    }
+    float bestCost = FLT_MAX;
+    int bestSplit = 1;
+    for (int split = 1; split < BINS; split++)
+    {
+        glm::vec3 lmin(FLT_MAX), lmax(-FLT_MAX), rmin(FLT_MAX), rmax(-FLT_MAX);
+        int nl = 0, nr = 0;
+        for (int b = 0; b < BINS; b++)
+        {
+            if (binCount[b] == 0)
+            {
+                continue;
+            }
+            if (b < split)
+            {
+                lmin = glm::min(lmin, binMin[b]);
+                lmax = glm::max(lmax, binMax[b]);
+                nl += binCount[b];
+            }
+            else
+            {
+                rmin = glm::min(rmin, binMin[b]);
+                rmax = glm::max(rmax, binMax[b]);
+                nr += binCount[b];
+            }
+        }
+        // cost ~ chance of hitting a child * triangles in it
+        float cost = nl * surfaceArea(lmin, lmax) + nr * surfaceArea(rmin, rmax);
+        if (nl > 0 && nr > 0 && cost < bestCost)
+        {
+            bestCost = cost;
+            bestSplit = split;
+        }
+    }
+
+    auto mid = std::partition(triangles.begin() + start, triangles.begin() + start + count,
+        [&](const Triangle& tri) { return binOf(tri) < bestSplit; });
+    int leftCount = mid - (triangles.begin() + start);
+
+    int child = bvh.size();
+    bvh.push_back({});
+    bvh.push_back({});
+    bvh[node].start = child;
+    bvh[node].count = 0;
+    buildNode(child, start, leftCount, maxLeafSize, depth + 1);
+    buildNode(child + 1, start + leftCount, count - leftCount, maxLeafSize, depth + 1);
+}

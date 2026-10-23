@@ -38,6 +38,7 @@ static bool camchanged = true;
 static bool headless = false;
 static int warmupIterations = 10;
 static double timedMs = 0.0;
+static int bvhLeafSize = 4;
 static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
@@ -293,6 +294,7 @@ void RenderImGui()
     ImGui::Checkbox("Sort by material", &imguiData->SortByMaterial);
     ImGui::Checkbox("Bounding box culling", &imguiData->BoundingBoxCulling);
     ImGui::Checkbox("Russian roulette", &imguiData->RussianRoulette);
+    ImGui::Checkbox("BVH", &imguiData->UseBVH);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -352,7 +354,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull] [--no-rr]\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull] [--no-rr] [--no-bvh] [--leaf N]\n", argv[0]);
         return 1;
     }
 
@@ -395,7 +397,16 @@ int main(int argc, char** argv)
         {
             guiData->RussianRoulette = false;
         }
+        else if (arg == "--no-bvh")
+        {
+            guiData->UseBVH = false;
+        }
+        else if (arg == "--leaf" && i + 1 < argc)
+        {
+            bvhLeafSize = atoi(argv[++i]);
+        }
     }
+    scene->buildBVH(bvhLeafSize);
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;
