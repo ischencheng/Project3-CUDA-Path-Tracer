@@ -182,13 +182,23 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         // TODO: implement antialiasing by jittering the ray
         // random point inside the pixel, depth 0 is only used here
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
-        thrust::uniform_real_distribution<float> u01(-0.5f, 0.5f);
-        float px = (float)x + u01(rng);
-        float py = (float)y + u01(rng);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        float px = (float)x + u01(rng) - 0.5f;
+        float py = (float)y + u01(rng) - 0.5f;
         segment.ray.direction = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * (px - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * (py - (float)cam.resolution.y * 0.5f)
         );
+
+        if (cam.lensRadius > 0.0f)
+        {
+            // thin lens: rays through the same pixel meet on the focal plane
+            glm::vec3 focus = cam.position + segment.ray.direction * (cam.focalDistance / glm::dot(segment.ray.direction, cam.view));
+            float r = cam.lensRadius * sqrtf(u01(rng));
+            float theta = TWO_PI * u01(rng);
+            segment.ray.origin = cam.position + cam.right * (r * cosf(theta)) + cam.up * (r * sinf(theta));
+            segment.ray.direction = glm::normalize(focus - segment.ray.origin);
+        }
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
