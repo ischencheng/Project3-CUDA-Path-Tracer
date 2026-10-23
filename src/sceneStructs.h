@@ -12,7 +12,8 @@
 enum GeomType
 {
     SPHERE,
-    CUBE
+    CUBE,
+    MESH
 };
 
 struct Ray
@@ -31,6 +32,19 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
+    // meshes only: triangle range and world space bounding box
+    int triStart;
+    int triCount;
+    glm::vec3 bboxMin;
+    glm::vec3 bboxMax;
+};
+
+// already in world space
+struct Triangle
+{
+    glm::vec3 v[3];
+    glm::vec3 n[3];
+    int materialid;
 };
 
 struct Material

@@ -86,6 +86,7 @@ static int* dev_materialKeys = NULL;
 static int* dev_sortIndices = NULL;
 static PathSegment* dev_pathsSorted = NULL;
 static ShadeableIntersection* dev_intersectionsSorted = NULL;
+static Triangle* dev_triangles = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -140,6 +141,9 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_pathsSorted, pixelcount * sizeof(PathSegment));
     cudaMalloc(&dev_intersectionsSorted, pixelcount * sizeof(ShadeableIntersection));
 
+    cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(Triangle));
+    cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
+
     checkCUDAError("pathtraceInit");
 }
 
@@ -155,6 +159,7 @@ void pathtraceFree()
     cudaFree(dev_sortIndices);
     cudaFree(dev_pathsSorted);
     cudaFree(dev_intersectionsSorted);
+    cudaFree(dev_triangles);
 
     checkCUDAError("pathtraceFree");
 }
@@ -205,6 +210,61 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
+// closest triangle of one mesh, -1 if nothing is closer than tMax
+__device__ float meshIntersectionTest(
+    const Geom& mesh,
+    const Triangle* triangles,
+    const Ray& r,
+    float tMax,
+    bool boxCulling,
+    glm::vec3& normal,
+    bool& outside,
+    int& materialId)
+{
+    if (boxCulling)
+    {
+        // skip all the triangles if the ray misses the box
+        float tBox = boundingBoxIntersectionTest(mesh.bboxMin, mesh.bboxMax, r, 1.0f / r.direction);
+        if (tBox < 0.0f || tBox > tMax)
+        {
+            return -1.0f;
+        }
+    }
+
+    int hit = -1;
+    glm::vec2 hitBary;
+    for (int i = mesh.triStart; i < mesh.triStart + mesh.triCount; i++)
+    {
+        glm::vec2 bary;
+        float t = triangleIntersectionTest(triangles[i], r, bary);
+        if (t > 1e-4f && t < tMax)
+        {
+            tMax = t;
+            hit = i;
+            hitBary = bary;
+        }
+    }
+    if (hit < 0)
+    {
+        return -1.0f;
+    }
+
+    const Triangle& tri = triangles[hit];
+    glm::vec3 ng = glm::normalize(glm::cross(tri.v[1] - tri.v[0], tri.v[2] - tri.v[0]));
+    glm::vec3 ns = tri.n[0] * (1.0f - hitBary.x - hitBary.y) + tri.n[1] * hitBary.x + tri.n[2] * hitBary.y;
+    ns = glm::dot(ns, ns) > 0.0f ? glm::normalize(ns) : ng;
+    // same rule as spheres: the normal faces the ray
+    outside = glm::dot(ng, r.direction) < 0.0f;
+    if (!outside)
+    {
+        ng = -ng;
+        ns = -ns;
+    }
+    normal = glm::dot(ns, r.direction) < 0.0f ? ns : ng;
+    materialId = tri.materialid;
+    return tMax;
+}
+
 // TODO:
 // computeIntersections handles generating ray intersections ONLY.
 // Generating new rays is handled in your shader(s).
@@ -215,6 +275,8 @@ __global__ void computeIntersections(
     PathSegment* pathSegments,
     Geom* geoms,
     int geoms_size,
+    Triangle* triangles,
+    bool boxCulling,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -233,16 +295,19 @@ __global__ void computeIntersections(
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
         bool outside = true;
+        int hit_material = -1;
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
         bool tmp_outside = true;
+        int tmp_material;
 
         // naive parse through global geoms
 
         for (int i = 0; i < geoms_size; i++)
         {
             Geom& geom = geoms[i];
+            tmp_material = geom.materialid;
 
             if (geom.type == CUBE)
             {
@@ -251,6 +316,10 @@ __global__ void computeIntersections(
             else if (geom.type == SPHERE)
             {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
+            }
+            else if (geom.type == MESH)
+            {
+                t = meshIntersectionTest(geom, triangles, pathSegment.ray, t_min, boxCulling, tmp_normal, tmp_outside, tmp_material);
             }
             // TODO: add more intersection tests here... triangle? metaball? CSG?
 
@@ -263,6 +332,7 @@ __global__ void computeIntersections(
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
                 outside = tmp_outside;
+                hit_material = tmp_material;
             }
         }
 
@@ -274,7 +344,7 @@ __global__ void computeIntersections(
         {
             // The ray hits something
             intersections[path_index].t = t_min;
-            intersections[path_index].materialId = geoms[hit_geom_index].materialid;
+            intersections[path_index].materialId = hit_material;
             intersections[path_index].surfaceNormal = normal;
             intersections[path_index].outside = outside;
         }
@@ -467,6 +537,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_geoms,
             hst_scene->geoms.size(),
+            dev_triangles,
+            guiData == NULL || guiData->BoundingBoxCulling,
             dev_intersections
         );
         checkCUDAError("trace one bounce");

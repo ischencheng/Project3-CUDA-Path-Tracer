@@ -291,6 +291,7 @@ void RenderImGui()
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
     ImGui::Checkbox("Stream compaction", &imguiData->StreamCompaction);
     ImGui::Checkbox("Sort by material", &imguiData->SortByMaterial);
+    ImGui::Checkbox("Bounding box culling", &imguiData->BoundingBoxCulling);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -350,7 +351,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort]\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull]\n", argv[0]);
         return 1;
     }
 
@@ -384,6 +385,10 @@ int main(int argc, char** argv)
         else if (arg == "--sort")
         {
             guiData->SortByMaterial = true;
+        }
+        else if (arg == "--no-cull")
+        {
+            guiData->BoundingBoxCulling = false;
         }
     }
 

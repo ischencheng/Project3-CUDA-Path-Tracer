@@ -18,10 +18,11 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0), StreamCompaction(true), SortByMaterial(false) {}
+    GuiDataContainer() : TracedDepth(0), StreamCompaction(true), SortByMaterial(false), BoundingBoxCulling(true) {}
     int TracedDepth;
     bool StreamCompaction;
     bool SortByMaterial;
+    bool BoundingBoxCulling;
 };
 
 namespace utilityCore
