@@ -412,6 +412,7 @@ __global__ void shadeMaterial(
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials,
+    bool russianRoulette,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -446,6 +447,21 @@ __global__ void shadeMaterial(
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, depth);
             glm::vec3 p = path.ray.origin + intersection.t * path.ray.direction;
             scatterRay(path, p, intersection.surfaceNormal, intersection.outside, material, rng);
+
+            if (russianRoulette && depth >= 3 && path.remainingBounces > 0)
+            {
+                // dim paths stop early, the ones that survive get boosted to stay unbiased
+                thrust::uniform_real_distribution<float> u01(0, 1);
+                float q = fminf(fmaxf(path.color.r, fmaxf(path.color.g, path.color.b)), 0.95f);
+                if (u01(rng) < q)
+                {
+                    path.color /= q;
+                }
+                else
+                {
+                    path.remainingBounces = 0;
+                }
+            }
         }
     }
     pathSegments[idx] = path;
@@ -571,6 +587,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_intersections,
             dev_paths,
             dev_materials,
+            guiData == NULL || guiData->RussianRoulette,
             dev_image
         );
         checkCUDAError("shade one bounce");

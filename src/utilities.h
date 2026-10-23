@@ -18,11 +18,12 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0), StreamCompaction(true), SortByMaterial(false), BoundingBoxCulling(true) {}
+    GuiDataContainer() : TracedDepth(0), StreamCompaction(true), SortByMaterial(false), BoundingBoxCulling(true), RussianRoulette(true) {}
     int TracedDepth;
     bool StreamCompaction;
     bool SortByMaterial;
     bool BoundingBoxCulling;
+    bool RussianRoulette;
 };
 
 namespace utilityCore
