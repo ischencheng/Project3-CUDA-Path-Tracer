@@ -20,6 +20,7 @@ Features:
 * Texture mapping and normal mapping from glTF files, and a procedural checker texture
 * Russian roulette
 * BVH built with binned SAH
+* Open Image Denoise with albedo and normal guides
 
 ### Running
 
@@ -32,6 +33,7 @@ Features:
 | `--warmup N` | iterations left out of the average time (10 by default) |
 | `--no-compact`, `--sort`, `--no-cull`, `--no-rr`, `--no-bvh` | turn a feature off (or sorting on) |
 | `--leaf N` | max triangles in a BVH leaf (4 by default) |
+| `--denoise` | also save a denoised image (see Open Image Denoise) |
 
 New things in the scene files: `"Refractive"` materials with an `"IOR"`, `"CHECKER"` (cells per unit) and `"RGB2"` for the procedural checker, `"APERTURE"` (lens radius) and `"FOCUS"` in the camera, and `"TYPE": "mesh"` objects with a `"FILE"` (`.gltf` or `.glb`, relative to the scene file). A mesh without a `"MATERIAL"` uses its own glTF materials. I also fixed how the base code turns the camera from the scene file into angles, so cameras that look up or down work now.
 
@@ -90,6 +92,25 @@ After 3 bounces, a path keeps going with probability q = max(r, g, b) of its col
 ### BVH
 
 Testing every triangle is far too slow for the cover scene, which has 150k triangles. I build a BVH for every mesh on the CPU. A node splits its triangles along the longest axis of their centroids with binned SAH: the centroids go into 16 bins, and for each of the 15 cuts between bins I estimate the cost as (triangles in a child) × (surface area of the child's box), summed over both children, and take the cheapest cut. A node becomes a leaf at 4 triangles (`--leaf`). The tree is stored in a flat array where the two children of a node sit next to each other. There is no recursion on the GPU, so the traversal keeps a small stack of node indices. At an interior node it tests both child boxes and pushes the nearer one last, so it is visited first and the closest hit distance shrinks sooner, which lets more far boxes be skipped.
+
+### Open Image Denoise
+
+![denoise](img/denoise.png)
+
+Open Image Denoise is a neural network filter from Intel that removes Monte Carlo noise. Besides the noisy image, it can take the albedo and the normal of the first hit as guides. They have no lighting noise, so they tell the filter where the edges and textures are and it doesn't blur them away. During the first bounce I add the material color (after textures) and the shading normal of every hit into two more buffers, in the same way the image adds up samples. When I save an image with `--denoise` (or the checkbox), I download the three buffers, divide them by the number of samples, run the `RT` filter with `hdr` on, and save `name.denoised.png` next to the normal image. The filter only runs when saving, so it doesn't slow down rendering. I ask for the CUDA device by name, because the default device pick also tries the Intel GPU of my laptop and fails there.
+
+From left to right: 32 samples, the same 32 samples denoised, and 5000 samples without denoising. The cloth comes out very clean, but the details inside the glass dragon get smoothed away, because the albedo and normal of the first hit don't know what is seen through the glass.
+
+This table shows the average difference from the 5000 sample image (pixel values 0 to 255).
+
+| samples | raw | denoised |
+| --- | --- | --- |
+| 32 | 12.3 | 1.9 |
+| 256 | 4.3 | 1.4 |
+
+32 denoised samples are closer to the 5000 sample image than 256 raw samples. Denoising one 1280x720 image takes 34 ms on the CUDA device and 371 ms on the CPU device (my i5-12500H), measured with `oidnBenchmark`. On the GPU that is less than one iteration of the cover, so it would even be cheap enough to denoise the preview every few iterations.
+
+Open Image Denoise is not in the repo because its binaries are about 80 MB. To build with it, download the Windows release (I used 2.5.1) from the [OIDN releases](https://github.com/OpenImageDenoise/oidn/releases) and unzip it into `external/oidn`. I changed `CMakeLists.txt` so it finds the package there, links it and copies its DLLs next to the exe. Without it everything still builds, and `--denoise` only prints a message.
 
 ### Performance Analysis
 
@@ -186,6 +207,7 @@ When I first added the glass cube, its edges came out black, while the glass sph
 
 ### Credits
 
+* [Open Image Denoise](https://github.com/OpenImageDenoise/oidn) 2.5.1 (not in the repo, see above)
 * [tinygltf](https://github.com/syoyo/tinygltf) v2.9 for reading glTF files, and the newer [stb_image](https://github.com/nothings/stb) v2.30 that it needs
 * [Damaged Helmet](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DamagedHelmet): © 2016 theblueturtle_ (CC BY-NC 4.0), rebuilt © 2018 ctxwing (CC BY 4.0)
 * [Dragon Attenuation](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DragonAttenuation): dragon © 1996 Stanford University Computer Graphics Laboratory, converted by Morgan McGuire; cloth backdrop by Adobe (CC0)
