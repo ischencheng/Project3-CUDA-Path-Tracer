@@ -56,6 +56,9 @@ struct Triangle
 {
     glm::vec3 v[3];
     glm::vec3 n[3];
+    glm::vec2 uv[3];
+    // w is the handedness of the bitangent
+    glm::vec4 tangent;
     int materialid;
 };
 
@@ -71,6 +74,20 @@ struct Material
     float hasRefractive;
     float indexOfRefraction;
     float emittance;
+    // -1 means no texture
+    int baseColorTexture = -1;
+    int normalTexture = -1;
+    // procedural checker in world space, 0 turns it off
+    float checkerScale = 0.0f;
+    glm::vec3 checkerColor;
+};
+
+// rgba8 texels live in one big buffer
+struct Texture
+{
+    int width;
+    int height;
+    int offset;
 };
 
 struct Camera
@@ -113,4 +130,7 @@ struct ShadeableIntersection
   glm::vec3 surfaceNormal;
   int materialId;
   bool outside;
+  // meshes only, the shader looks up uv and tangent when it needs them
+  int triangle;
+  glm::vec2 bary;
 };

@@ -73,6 +73,12 @@ void Scene::loadFromJSON(const std::string& jsonName)
             newMaterial.hasRefractive = 1.0f;
             newMaterial.indexOfRefraction = p["IOR"];
         }
+        if (p.contains("CHECKER"))
+        {
+            const auto& col2 = p["RGB2"];
+            newMaterial.checkerScale = p["CHECKER"];
+            newMaterial.checkerColor = glm::vec3(col2[0], col2[1], col2[2]);
+        }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
     }
@@ -237,13 +243,44 @@ void Scene::loadGLTF(const std::string& file, const glm::mat4& transform, int ma
         exit(-1);
     }
 
-    // one material per gltf material
+    // copy a gltf texture into the texel buffer, each image only once
+    std::unordered_map<int, int> imageToTexture;
+    auto addTexture = [&](int textureIndex)
+    {
+        if (textureIndex < 0)
+        {
+            return -1;
+        }
+        int imageIndex = model.textures[textureIndex].source;
+        if (imageToTexture.count(imageIndex))
+        {
+            return imageToTexture[imageIndex];
+        }
+        const tinygltf::Image& image = model.images[imageIndex];
+        Texture tex{ image.width, image.height, (int)texels.size() };
+        for (int i = 0; i < image.width * image.height; i++)
+        {
+            const unsigned char* c = &image.image[i * image.component];
+            texels.push_back(make_uchar4(c[0], c[image.component > 1 ? 1 : 0], c[image.component > 2 ? 2 : 0], 255));
+        }
+        imageToTexture[imageIndex] = textures.size();
+        textures.push_back(tex);
+        return imageToTexture[imageIndex];
+    };
+
+    // one material per gltf material, unless the scene file gives one
     int firstMaterial = materials.size();
     for (const tinygltf::Material& m : model.materials)
     {
+        if (materialOverride >= 0)
+        {
+            continue;
+        }
         Material newMaterial{};
         const auto& c = m.pbrMetallicRoughness.baseColorFactor;
         newMaterial.color = glm::vec3(c[0], c[1], c[2]);
+        newMaterial.baseColorTexture = addTexture(m.pbrMetallicRoughness.baseColorTexture.index);
+        newMaterial.normalTexture = addTexture(m.normalTexture.index);
         // gltf glass comes from the transmission extension
         auto transmission = m.extensions.find("KHR_materials_transmission");
         if (transmission != m.extensions.end() && transmission->second.Get("transmissionFactor").GetNumberAsDouble() > 0.0)
@@ -285,6 +322,7 @@ void Scene::loadGLTF(const std::string& file, const glm::mat4& transform, int ma
             }
             int positions = prim.attributes.at("POSITION");
             int normals = prim.attributes.count("NORMAL") ? prim.attributes.at("NORMAL") : -1;
+            int uvs = prim.attributes.count("TEXCOORD_0") ? prim.attributes.at("TEXCOORD_0") : -1;
             int count = prim.indices >= 0 ? model.accessors[prim.indices].count : model.accessors[positions].count;
             int material = materialOverride >= 0 ? materialOverride : firstMaterial + std::max(prim.material, 0);
 
@@ -297,6 +335,22 @@ void Scene::loadGLTF(const std::string& file, const glm::mat4& transform, int ma
                     tri.v[k] = glm::vec3(world * glm::vec4(readAttribute<glm::vec3>(model, positions, v), 1.0f));
                     // zero means no normal, the flat one gets used
                     tri.n[k] = normals >= 0 ? glm::normalize(normalMatrix * readAttribute<glm::vec3>(model, normals, v)) : glm::vec3(0.0f);
+                    tri.uv[k] = uvs >= 0 ? readAttribute<glm::vec2>(model, uvs, v) : glm::vec2(0.0f);
+                }
+
+                // tangent from how uv changes along the edges, used by normal maps
+                glm::vec3 e1 = tri.v[1] - tri.v[0];
+                glm::vec3 e2 = tri.v[2] - tri.v[0];
+                glm::vec2 d1 = tri.uv[1] - tri.uv[0];
+                glm::vec2 d2 = tri.uv[2] - tri.uv[0];
+                float det = d1.x * d2.y - d2.x * d1.y;
+                tri.tangent = glm::vec4(0.0f);
+                if (fabsf(det) > 1e-12f)
+                {
+                    glm::vec3 t = (e1 * d2.y - e2 * d1.y) / det;
+                    glm::vec3 b = (e2 * d1.x - e1 * d2.x) / det;
+                    float sign = glm::dot(glm::cross(glm::cross(e1, e2), t), b) < 0.0f ? -1.0f : 1.0f;
+                    tri.tangent = glm::vec4(glm::normalize(t), sign);
                 }
                 tri.materialid = material;
                 triangles.push_back(tri);
