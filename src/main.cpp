@@ -1,3 +1,4 @@
+#include "denoise.h"
 #include "glslUtility.hpp"
 #include "image.h"
 #include "pathtrace.h"
@@ -295,6 +296,7 @@ void RenderImGui()
     ImGui::Checkbox("Bounding box culling", &imguiData->BoundingBoxCulling);
     ImGui::Checkbox("Russian roulette", &imguiData->RussianRoulette);
     ImGui::Checkbox("BVH", &imguiData->UseBVH);
+    ImGui::Checkbox("Denoise on save", &imguiData->Denoise);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -354,7 +356,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull] [--no-rr] [--no-bvh] [--leaf N]\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull] [--no-rr] [--no-bvh] [--leaf N] [--denoise]\n", argv[0]);
         return 1;
     }
 
@@ -404,6 +406,10 @@ int main(int argc, char** argv)
         else if (arg == "--leaf" && i + 1 < argc)
         {
             bvhLeafSize = atoi(argv[++i]);
+        }
+        else if (arg == "--denoise")
+        {
+            guiData->Denoise = true;
         }
     }
     scene->buildBVH(bvhLeafSize);
@@ -478,6 +484,31 @@ void saveImage()
     // CHECKITOUT
     img.savePNG(filename);
     //img.saveHDR(filename);  // Save a Radiance HDR file
+
+    if (guiData->Denoise)
+    {
+        // the denoiser wants averages, not sums
+        int n = width * height;
+        std::vector<glm::vec3> color(n), albedo(n), normal(n), output;
+        for (int i = 0; i < n; i++)
+        {
+            color[i] = renderState->image[i] / samples;
+            albedo[i] = renderState->albedo[i] / samples;
+            normal[i] = renderState->normal[i] / samples;
+        }
+        if (denoiseImage(color, albedo, normal, width, height, output))
+        {
+            Image denoised(width, height);
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    denoised.setPixel(width - 1 - x, y, output[x + y * width]);
+                }
+            }
+            denoised.savePNG(filename + ".denoised");
+        }
+    }
 }
 
 void runCuda()

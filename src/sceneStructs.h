@@ -110,6 +110,9 @@ struct RenderState
     unsigned int iterations;
     int traceDepth;
     std::vector<glm::vec3> image;
+    // first hit albedo and normal for the denoiser
+    std::vector<glm::vec3> albedo;
+    std::vector<glm::vec3> normal;
     std::string imageName;
 };
 

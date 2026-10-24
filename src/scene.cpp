@@ -169,6 +169,8 @@ void Scene::loadFromJSON(const std::string& jsonName)
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
+    state.albedo.resize(arraylen);
+    state.normal.resize(arraylen);
 }
 
 static glm::mat4 nodeTransform(const tinygltf::Node& node)

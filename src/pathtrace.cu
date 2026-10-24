@@ -78,6 +78,8 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
 static Scene* hst_scene = NULL;
 static GuiDataContainer* guiData = NULL;
 static glm::vec3* dev_image = NULL;
+static glm::vec3* dev_albedo = NULL;
+static glm::vec3* dev_normal = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static PathSegment* dev_paths = NULL;
@@ -126,6 +128,10 @@ void pathtraceInit(Scene* scene)
 
     cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
     cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_albedo, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_albedo, 0, pixelcount * sizeof(glm::vec3));
+    cudaMalloc(&dev_normal, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_normal, 0, pixelcount * sizeof(glm::vec3));
 
     cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment));
 
@@ -160,6 +166,8 @@ void pathtraceInit(Scene* scene)
 void pathtraceFree()
 {
     cudaFree(dev_image);  // no-op if dev_image is null
+    cudaFree(dev_albedo);
+    cudaFree(dev_normal);
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
@@ -511,7 +519,9 @@ __global__ void shadeMaterial(
     Texture* textures,
     uchar4* texels,
     bool russianRoulette,
-    glm::vec3* image)
+    glm::vec3* image,
+    glm::vec3* albedos,
+    glm::vec3* normals)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -539,6 +549,11 @@ __global__ void shadeMaterial(
             // one path per pixel, so no atomics needed
             image[path.pixelIndex] += path.color * material.color * material.emittance;
             path.remainingBounces = 0;
+            if (depth == 1)
+            {
+                albedos[path.pixelIndex] += material.color;
+                normals[path.pixelIndex] += intersection.surfaceNormal;
+            }
         }
         else
         {
@@ -577,6 +592,12 @@ __global__ void shadeMaterial(
                 glm::vec3 b = glm::cross(n, t) * tangent.w;
                 glm::vec3 m = sampleTexture(textures[material.normalTexture], texels, uv) * 2.0f - 1.0f;
                 n = glm::normalize(t * m.x + b * m.y + n * m.z);
+            }
+            // first hit albedo and normal guide the denoiser
+            if (depth == 1)
+            {
+                albedos[path.pixelIndex] += material.color;
+                normals[path.pixelIndex] += n;
             }
             scatterRay(path, p, n, intersection.outside, material, rng);
 
@@ -725,7 +746,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_textures,
             dev_texels,
             guiData == NULL || guiData->RussianRoulette,
-            dev_image
+            dev_image,
+            dev_albedo,
+            dev_normal
         );
         checkCUDAError("shade one bounce");
 
@@ -765,5 +788,9 @@ void pathtraceDownloadImage()
 
     // Retrieve image from GPU
     cudaMemcpy(hst_scene->state.image.data(), dev_image,
+        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hst_scene->state.albedo.data(), dev_albedo,
+        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hst_scene->state.normal.data(), dev_normal,
         pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 }
