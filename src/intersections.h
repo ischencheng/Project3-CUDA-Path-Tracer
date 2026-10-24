@@ -38,6 +38,46 @@ __host__ __device__ inline glm::vec3 multiplyMV(glm::mat4 m, glm::vec4 v)
     return glm::vec3(m * v);
 }
 
+// moller-trumbore, returns the distance and the barycentric (u, v)
+__host__ __device__ inline float triangleIntersectionTest(const Triangle& tri, const Ray& r, glm::vec2& bary)
+{
+    glm::vec3 e1 = tri.v[1] - tri.v[0];
+    glm::vec3 e2 = tri.v[2] - tri.v[0];
+    glm::vec3 p = glm::cross(r.direction, e2);
+    float det = glm::dot(e1, p);
+    if (fabsf(det) < 1e-10f)
+    {
+        return -1.0f;
+    }
+    float invDet = 1.0f / det;
+    glm::vec3 s = r.origin - tri.v[0];
+    float u = glm::dot(s, p) * invDet;
+    if (u < 0.0f || u > 1.0f)
+    {
+        return -1.0f;
+    }
+    glm::vec3 q = glm::cross(s, e1);
+    float v = glm::dot(r.direction, q) * invDet;
+    if (v < 0.0f || u + v > 1.0f)
+    {
+        return -1.0f;
+    }
+    bary = glm::vec2(u, v);
+    return glm::dot(e2, q) * invDet;
+}
+
+// slab test, returns where the ray enters the box (0 if it starts inside)
+__host__ __device__ inline float boundingBoxIntersectionTest(const glm::vec3& bmin, const glm::vec3& bmax, const Ray& r, const glm::vec3& invDir)
+{
+    glm::vec3 t0 = (bmin - r.origin) * invDir;
+    glm::vec3 t1 = (bmax - r.origin) * invDir;
+    glm::vec3 tNear = glm::min(t0, t1);
+    glm::vec3 tFar = glm::max(t0, t1);
+    float tEnter = fmaxf(fmaxf(tNear.x, tNear.y), fmaxf(tNear.z, 0.0f));
+    float tExit = fminf(fminf(tFar.x, tFar.y), tFar.z);
+    return tEnter <= tExit ? tEnter : -1.0f;
+}
+
 // CHECKITOUT
 /**
  * Test intersection between a ray and a transformed cube. Untransformed,
@@ -49,7 +89,7 @@ __host__ __device__ inline glm::vec3 multiplyMV(glm::mat4 m, glm::vec4 v)
  * @return                   Ray parameter `t` value. -1 if no intersection.
  */
 __host__ __device__ float boxIntersectionTest(
-    Geom box,
+    const Geom& box,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
@@ -66,7 +106,7 @@ __host__ __device__ float boxIntersectionTest(
  * @return                   Ray parameter `t` value. -1 if no intersection.
  */
 __host__ __device__ float sphereIntersectionTest(
-    Geom sphere,
+    const Geom& sphere,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,

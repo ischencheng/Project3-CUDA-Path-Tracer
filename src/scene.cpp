@@ -3,8 +3,14 @@
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/string_cast.hpp>
 #include "json.hpp"
+
+#define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#include "tiny_gltf.h"
 
 #include <fstream>
 #include <iostream>
@@ -58,6 +64,20 @@ void Scene::loadFromJSON(const std::string& jsonName)
         {
             const auto& col = p["RGB"];
             newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.hasReflective = 1.0f;
+        }
+        else if (p["TYPE"] == "Refractive")
+        {
+            const auto& col = p["RGB"];
+            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.hasRefractive = 1.0f;
+            newMaterial.indexOfRefraction = p["IOR"];
+        }
+        if (p.contains("CHECKER"))
+        {
+            const auto& col2 = p["RGB2"];
+            newMaterial.checkerScale = p["CHECKER"];
+            newMaterial.checkerColor = glm::vec3(col2[0], col2[1], col2[2]);
         }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
@@ -71,11 +91,16 @@ void Scene::loadFromJSON(const std::string& jsonName)
         {
             newGeom.type = CUBE;
         }
+        else if (type == "mesh")
+        {
+            newGeom.type = MESH;
+        }
         else
         {
             newGeom.type = SPHERE;
         }
-        newGeom.materialid = MatNameToID[p["MATERIAL"]];
+        // meshes can use their own gltf materials
+        newGeom.materialid = p.contains("MATERIAL") ? (int)MatNameToID[p["MATERIAL"]] : -1;
         const auto& trans = p["TRANS"];
         const auto& rotat = p["ROTAT"];
         const auto& scale = p["SCALE"];
@@ -86,6 +111,26 @@ void Scene::loadFromJSON(const std::string& jsonName)
             newGeom.translation, newGeom.rotation, newGeom.scale);
         newGeom.inverseTransform = glm::inverse(newGeom.transform);
         newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
+
+        if (newGeom.type == MESH)
+        {
+            // the path is relative to the scene file
+            std::string dir = jsonName.substr(0, jsonName.find_last_of("/\\") + 1);
+            newGeom.triStart = triangles.size();
+            loadGLTF(dir + p["FILE"].get<std::string>(), newGeom.transform, newGeom.materialid);
+            newGeom.triCount = triangles.size() - newGeom.triStart;
+            newGeom.bboxMin = glm::vec3(FLT_MAX);
+            newGeom.bboxMax = glm::vec3(-FLT_MAX);
+            for (int i = newGeom.triStart; i < triangles.size(); i++)
+            {
+                for (int k = 0; k < 3; k++)
+                {
+                    newGeom.bboxMin = glm::min(newGeom.bboxMin, triangles[i].v[k]);
+                    newGeom.bboxMax = glm::max(newGeom.bboxMax, triangles[i].v[k]);
+                }
+            }
+            cout << "Loaded " << newGeom.triCount << " triangles from " << p["FILE"] << endl;
+        }
 
         geoms.push_back(newGeom);
     }
@@ -104,6 +149,9 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.position = glm::vec3(pos[0], pos[1], pos[2]);
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
+    // optional thin lens for depth of field
+    camera.lensRadius = cameraData.value("APERTURE", 0.0f);
+    camera.focalDistance = cameraData.value("FOCUS", glm::length(camera.lookAt - camera.position));
 
     //calculate fov based on resolution
     float yscaled = tan(fovy * (PI / 180));
@@ -121,4 +169,311 @@ void Scene::loadFromJSON(const std::string& jsonName)
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
+    state.albedo.resize(arraylen);
+    state.normal.resize(arraylen);
+}
+
+static glm::mat4 nodeTransform(const tinygltf::Node& node)
+{
+    if (node.matrix.size() == 16)
+    {
+        glm::mat4 m;
+        for (int i = 0; i < 16; i++)
+        {
+            m[i / 4][i % 4] = (float)node.matrix[i];
+        }
+        return m;
+    }
+    glm::mat4 m(1.0f);
+    if (node.translation.size() == 3)
+    {
+        m = glm::translate(m, glm::vec3(node.translation[0], node.translation[1], node.translation[2]));
+    }
+    if (node.rotation.size() == 4)
+    {
+        // gltf stores x y z w, glm::quat takes w first
+        m = m * glm::mat4_cast(glm::quat((float)node.rotation[3], (float)node.rotation[0], (float)node.rotation[1], (float)node.rotation[2]));
+    }
+    if (node.scale.size() == 3)
+    {
+        m = glm::scale(m, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
+    }
+    return m;
+}
+
+// element i of a float attribute (vec2 or vec3)
+template <typename T>
+static T readAttribute(const tinygltf::Model& model, int accessorIndex, int i)
+{
+    const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+    const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+    const unsigned char* data = model.buffers[view.buffer].data.data()
+        + view.byteOffset + accessor.byteOffset + i * accessor.ByteStride(view);
+    T value;
+    memcpy(&value, data, sizeof(T));
+    return value;
+}
+
+static int readIndex(const tinygltf::Model& model, int accessorIndex, int i)
+{
+    const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+    const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+    const unsigned char* data = model.buffers[view.buffer].data.data()
+        + view.byteOffset + accessor.byteOffset + i * accessor.ByteStride(view);
+    if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE)
+    {
+        return *data;
+    }
+    if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)
+    {
+        return *(const uint16_t*)data;
+    }
+    return *(const uint32_t*)data;
+}
+
+void Scene::loadGLTF(const std::string& file, const glm::mat4& transform, int materialOverride)
+{
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    std::string err, warn;
+    bool ok = file.substr(file.find_last_of('.')) == ".glb"
+        ? loader.LoadBinaryFromFile(&model, &err, &warn, file)
+        : loader.LoadASCIIFromFile(&model, &err, &warn, file);
+    if (!ok)
+    {
+        cout << "Couldn't load " << file << ": " << err << endl;
+        exit(-1);
+    }
+
+    // copy a gltf texture into the texel buffer, each image only once
+    std::unordered_map<int, int> imageToTexture;
+    auto addTexture = [&](int textureIndex)
+    {
+        if (textureIndex < 0)
+        {
+            return -1;
+        }
+        int imageIndex = model.textures[textureIndex].source;
+        if (imageToTexture.count(imageIndex))
+        {
+            return imageToTexture[imageIndex];
+        }
+        const tinygltf::Image& image = model.images[imageIndex];
+        Texture tex{ image.width, image.height, (int)texels.size() };
+        for (int i = 0; i < image.width * image.height; i++)
+        {
+            const unsigned char* c = &image.image[i * image.component];
+            texels.push_back(make_uchar4(c[0], c[image.component > 1 ? 1 : 0], c[image.component > 2 ? 2 : 0], 255));
+        }
+        imageToTexture[imageIndex] = textures.size();
+        textures.push_back(tex);
+        return imageToTexture[imageIndex];
+    };
+
+    // one material per gltf material, unless the scene file gives one
+    int firstMaterial = materials.size();
+    for (const tinygltf::Material& m : model.materials)
+    {
+        if (materialOverride >= 0)
+        {
+            continue;
+        }
+        Material newMaterial{};
+        const auto& c = m.pbrMetallicRoughness.baseColorFactor;
+        newMaterial.color = glm::vec3(c[0], c[1], c[2]);
+        newMaterial.baseColorTexture = addTexture(m.pbrMetallicRoughness.baseColorTexture.index);
+        newMaterial.normalTexture = addTexture(m.normalTexture.index);
+        // gltf glass comes from the transmission extension
+        auto transmission = m.extensions.find("KHR_materials_transmission");
+        if (transmission != m.extensions.end() && transmission->second.Get("transmissionFactor").GetNumberAsDouble() > 0.0)
+        {
+            newMaterial.hasRefractive = 1.0f;
+            newMaterial.indexOfRefraction = 1.5f;
+        }
+        materials.push_back(newMaterial);
+    }
+
+    // walk the node tree, children get the parent transform
+    std::vector<std::pair<int, glm::mat4>> stack;
+    const tinygltf::Scene& gltfScene = model.scenes[model.defaultScene >= 0 ? model.defaultScene : 0];
+    for (int n : gltfScene.nodes)
+    {
+        stack.push_back({ n, transform });
+    }
+    while (!stack.empty())
+    {
+        auto [nodeIndex, parent] = stack.back();
+        stack.pop_back();
+        const tinygltf::Node& node = model.nodes[nodeIndex];
+        glm::mat4 world = parent * nodeTransform(node);
+        for (int c : node.children)
+        {
+            stack.push_back({ c, world });
+        }
+        if (node.mesh < 0)
+        {
+            continue;
+        }
+
+        glm::mat3 normalMatrix = glm::inverseTranspose(glm::mat3(world));
+        for (const tinygltf::Primitive& prim : model.meshes[node.mesh].primitives)
+        {
+            if (prim.mode != TINYGLTF_MODE_TRIANGLES)
+            {
+                continue;
+            }
+            int positions = prim.attributes.at("POSITION");
+            int normals = prim.attributes.count("NORMAL") ? prim.attributes.at("NORMAL") : -1;
+            int uvs = prim.attributes.count("TEXCOORD_0") ? prim.attributes.at("TEXCOORD_0") : -1;
+            int count = prim.indices >= 0 ? model.accessors[prim.indices].count : model.accessors[positions].count;
+            int material = materialOverride >= 0 ? materialOverride : firstMaterial + std::max(prim.material, 0);
+
+            for (int i = 0; i + 2 < count; i += 3)
+            {
+                Triangle tri;
+                for (int k = 0; k < 3; k++)
+                {
+                    int v = prim.indices >= 0 ? readIndex(model, prim.indices, i + k) : i + k;
+                    tri.v[k] = glm::vec3(world * glm::vec4(readAttribute<glm::vec3>(model, positions, v), 1.0f));
+                    // zero means no normal, the flat one gets used
+                    tri.n[k] = normals >= 0 ? glm::normalize(normalMatrix * readAttribute<glm::vec3>(model, normals, v)) : glm::vec3(0.0f);
+                    tri.uv[k] = uvs >= 0 ? readAttribute<glm::vec2>(model, uvs, v) : glm::vec2(0.0f);
+                }
+
+                // tangent from how uv changes along the edges, used by normal maps
+                glm::vec3 e1 = tri.v[1] - tri.v[0];
+                glm::vec3 e2 = tri.v[2] - tri.v[0];
+                glm::vec2 d1 = tri.uv[1] - tri.uv[0];
+                glm::vec2 d2 = tri.uv[2] - tri.uv[0];
+                float det = d1.x * d2.y - d2.x * d1.y;
+                tri.tangent = glm::vec4(0.0f);
+                if (fabsf(det) > 1e-12f)
+                {
+                    glm::vec3 t = (e1 * d2.y - e2 * d1.y) / det;
+                    glm::vec3 b = (e2 * d1.x - e1 * d2.x) / det;
+                    float sign = glm::dot(glm::cross(glm::cross(e1, e2), t), b) < 0.0f ? -1.0f : 1.0f;
+                    tri.tangent = glm::vec4(glm::normalize(t), sign);
+                }
+                tri.materialid = material;
+                triangles.push_back(tri);
+            }
+        }
+    }
+}
+
+void Scene::buildBVH(int maxLeafSize)
+{
+    // one tree per mesh, built on the cpu
+    bvh.clear();
+    for (Geom& geom : geoms)
+    {
+        if (geom.type == MESH)
+        {
+            geom.bvhRoot = bvh.size();
+            bvh.push_back({});
+            buildNode(geom.bvhRoot, geom.triStart, geom.triCount, maxLeafSize, 0);
+        }
+    }
+    cout << "BVH has " << bvh.size() << " nodes" << endl;
+}
+
+static float surfaceArea(const glm::vec3& bmin, const glm::vec3& bmax)
+{
+    glm::vec3 d = bmax - bmin;
+    return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
+}
+
+void Scene::buildNode(int node, int start, int count, int maxLeafSize, int depth)
+{
+    glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX), cmin(FLT_MAX), cmax(-FLT_MAX);
+    for (int i = start; i < start + count; i++)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            bmin = glm::min(bmin, triangles[i].v[k]);
+            bmax = glm::max(bmax, triangles[i].v[k]);
+        }
+        glm::vec3 c = (triangles[i].v[0] + triangles[i].v[1] + triangles[i].v[2]) / 3.0f;
+        cmin = glm::min(cmin, c);
+        cmax = glm::max(cmax, c);
+    }
+    bvh[node] = { bmin, start, bmax, count };
+
+    // split along the longest axis of the centroid box
+    glm::vec3 extent = cmax - cmin;
+    int axis = extent.x > extent.y ? (extent.x > extent.z ? 0 : 2) : (extent.y > extent.z ? 1 : 2);
+    if (count <= maxLeafSize || depth >= 40 || extent[axis] < 1e-6f)
+    {
+        return;
+    }
+
+    // binned SAH: drop centroids into bins, then try every split between two bins
+    const int BINS = 16;
+    auto binOf = [&](const Triangle& tri)
+    {
+        float c = (tri.v[0][axis] + tri.v[1][axis] + tri.v[2][axis]) / 3.0f;
+        return std::min((int)((c - cmin[axis]) / extent[axis] * BINS), BINS - 1);
+    };
+    glm::vec3 binMin[BINS], binMax[BINS];
+    int binCount[BINS] = {};
+    for (int b = 0; b < BINS; b++)
+    {
+        binMin[b] = glm::vec3(FLT_MAX);
+        binMax[b] = glm::vec3(-FLT_MAX);
+    }
+    for (int i = start; i < start + count; i++)
+    {
+        int b = binOf(triangles[i]);
+        binCount[b]++;
+        for (int k = 0; k < 3; k++)
+        {
+            binMin[b] = glm::min(binMin[b], triangles[i].v[k]);
+            binMax[b] = glm::max(binMax[b], triangles[i].v[k]);
+        }
+    }
+    float bestCost = FLT_MAX;
+    int bestSplit = 1;
+    for (int split = 1; split < BINS; split++)
+    {
+        glm::vec3 lmin(FLT_MAX), lmax(-FLT_MAX), rmin(FLT_MAX), rmax(-FLT_MAX);
+        int nl = 0, nr = 0;
+        for (int b = 0; b < BINS; b++)
+        {
+            if (binCount[b] == 0)
+            {
+                continue;
+            }
+            if (b < split)
+            {
+                lmin = glm::min(lmin, binMin[b]);
+                lmax = glm::max(lmax, binMax[b]);
+                nl += binCount[b];
+            }
+            else
+            {
+                rmin = glm::min(rmin, binMin[b]);
+                rmax = glm::max(rmax, binMax[b]);
+                nr += binCount[b];
+            }
+        }
+        // cost ~ chance of hitting a child * triangles in it
+        float cost = nl * surfaceArea(lmin, lmax) + nr * surfaceArea(rmin, rmax);
+        if (nl > 0 && nr > 0 && cost < bestCost)
+        {
+            bestCost = cost;
+            bestSplit = split;
+        }
+    }
+
+    auto mid = std::partition(triangles.begin() + start, triangles.begin() + start + count,
+        [&](const Triangle& tri) { return binOf(tri) < bestSplit; });
+    int leftCount = mid - (triangles.begin() + start);
+
+    int child = bvh.size();
+    bvh.push_back({});
+    bvh.push_back({});
+    bvh[node].start = child;
+    bvh[node].count = 0;
+    buildNode(child, start, leftCount, maxLeafSize, depth + 1);
+    buildNode(child + 1, start + leftCount, count - leftCount, maxLeafSize, depth + 1);
 }

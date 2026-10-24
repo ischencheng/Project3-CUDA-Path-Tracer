@@ -49,6 +49,7 @@ find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
 
 set(headers
+    src/denoise.h
     src/image.h
     src/interactions.h
     src/intersections.h
@@ -60,6 +61,7 @@ set(headers
 )
 
 set(sources
+    src/denoise.cpp
     src/main.cpp
     src/stb.cpp
     src/image.cpp
@@ -112,6 +114,16 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     #stream_compaction  # TODO: uncomment if using your stream compaction
 )
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# optional Open Image Denoise: unzip the windows release into external/oidn
+find_package(OpenImageDenoise 2 CONFIG PATHS "${CMAKE_SOURCE_DIR}/external/oidn" NO_DEFAULT_PATH)
+if(OpenImageDenoise_FOUND)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE USE_OIDN)
+    target_link_libraries(${CMAKE_PROJECT_NAME} OpenImageDenoise)
+    file(GLOB OIDN_DLLS "${CMAKE_SOURCE_DIR}/external/oidn/bin/*.dll")
+    add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OIDN_DLLS} $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>)
+endif()
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES native)
 
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Debug,RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:-G;-src-in-ptx>")

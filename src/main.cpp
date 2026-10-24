@@ -1,3 +1,4 @@
+#include "denoise.h"
 #include "glslUtility.hpp"
 #include "image.h"
 #include "pathtrace.h"
@@ -17,6 +18,7 @@
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -34,6 +36,10 @@ static double lastX;
 static double lastY;
 
 static bool camchanged = true;
+static bool headless = false;
+static int warmupIterations = 10;
+static double timedMs = 0.0;
+static int bvhLeafSize = 4;
 static float dtheta = 0, dphi = 0;
 static glm::vec3 cammove;
 
@@ -285,6 +291,12 @@ void RenderImGui()
     //ImGui::SameLine();
     //ImGui::Text("counter = %d", counter);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+    ImGui::Checkbox("Stream compaction", &imguiData->StreamCompaction);
+    ImGui::Checkbox("Sort by material", &imguiData->SortByMaterial);
+    ImGui::Checkbox("Bounding box culling", &imguiData->BoundingBoxCulling);
+    ImGui::Checkbox("Russian roulette", &imguiData->RussianRoulette);
+    ImGui::Checkbox("BVH", &imguiData->UseBVH);
+    ImGui::Checkbox("Denoise on save", &imguiData->Denoise);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -344,7 +356,7 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--spp N] [--warmup N] [--no-compact] [--sort] [--no-cull] [--no-rr] [--no-bvh] [--leaf N] [--denoise]\n", argv[0]);
         return 1;
     }
 
@@ -355,6 +367,52 @@ int main(int argc, char** argv)
 
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();
+
+    for (int i = 2; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if (arg == "--headless")
+        {
+            headless = true;
+        }
+        else if (arg == "--spp" && i + 1 < argc)
+        {
+            scene->state.iterations = atoi(argv[++i]);
+        }
+        else if (arg == "--warmup" && i + 1 < argc)
+        {
+            warmupIterations = atoi(argv[++i]);
+        }
+        else if (arg == "--no-compact")
+        {
+            guiData->StreamCompaction = false;
+        }
+        else if (arg == "--sort")
+        {
+            guiData->SortByMaterial = true;
+        }
+        else if (arg == "--no-cull")
+        {
+            guiData->BoundingBoxCulling = false;
+        }
+        else if (arg == "--no-rr")
+        {
+            guiData->RussianRoulette = false;
+        }
+        else if (arg == "--no-bvh")
+        {
+            guiData->UseBVH = false;
+        }
+        else if (arg == "--leaf" && i + 1 < argc)
+        {
+            bvhLeafSize = atoi(argv[++i]);
+        }
+        else if (arg == "--denoise")
+        {
+            guiData->Denoise = true;
+        }
+    }
+    scene->buildBVH(bvhLeafSize);
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;
@@ -372,12 +430,21 @@ int main(int argc, char** argv)
 
     // compute phi (horizontal) and theta (vertical) relative 3D axis
     // so, (0 0 1) is forward, (0 1 0) is up
-    glm::vec3 viewXZ = glm::vec3(view.x, 0.0f, view.z);
-    glm::vec3 viewZY = glm::vec3(0.0f, view.y, view.z);
-    phi = glm::acos(glm::dot(glm::normalize(viewXZ), glm::vec3(0, 0, -1)));
-    theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
+    // runCuda puts the camera at lookAt + zoom * dir(phi, theta), so dir has to be -view
+    phi = atan2(-view.x, -view.z);
+    theta = acos(-view.y);
     ogLookAt = cam.lookAt;
     zoom = glm::length(cam.position - ogLookAt);
+
+    if (headless)
+    {
+        // no window, runCuda exits after the last iteration
+        InitDataContainer(guiData);
+        while (true)
+        {
+            runCuda();
+        }
+    }
 
     // Initialize CUDA and GL components
     init();
@@ -394,6 +461,7 @@ int main(int argc, char** argv)
 
 void saveImage()
 {
+    pathtraceDownloadImage();
     float samples = iteration;
     // output image file
     Image img(width, height);
@@ -416,6 +484,31 @@ void saveImage()
     // CHECKITOUT
     img.savePNG(filename);
     //img.saveHDR(filename);  // Save a Radiance HDR file
+
+    if (guiData->Denoise)
+    {
+        // the denoiser wants averages, not sums
+        int n = width * height;
+        std::vector<glm::vec3> color(n), albedo(n), normal(n), output;
+        for (int i = 0; i < n; i++)
+        {
+            color[i] = renderState->image[i] / samples;
+            albedo[i] = renderState->albedo[i] / samples;
+            normal[i] = renderState->normal[i] / samples;
+        }
+        if (denoiseImage(color, albedo, normal, width, height, output))
+        {
+            Image denoised(width, height);
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    denoised.setPixel(width - 1 - x, y, output[x + y * width]);
+                }
+            }
+            denoised.savePNG(filename + ".denoised");
+        }
+    }
 }
 
 void runCuda()
@@ -431,7 +524,7 @@ void runCuda()
         cam.view = -glm::normalize(cameraPosition);
         glm::vec3 v = cam.view;
         glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
-        glm::vec3 r = glm::cross(v, u);
+        glm::vec3 r = glm::normalize(glm::cross(v, u));
         cam.up = glm::cross(r, v);
         cam.right = r;
 
@@ -439,6 +532,7 @@ void runCuda()
         cameraPosition += cam.lookAt;
         cam.position = cameraPosition;
         camchanged = false;
+        timedMs = 0.0;
     }
 
     // Map OpenGL buffer object for writing from CUDA on a single GPU
@@ -454,17 +548,35 @@ void runCuda()
     {
         uchar4* pbo_dptr = NULL;
         iteration++;
-        cudaGLMapBufferObject((void**)&pbo_dptr, pbo);
+        if (!headless)
+        {
+            cudaGLMapBufferObject((void**)&pbo_dptr, pbo);
+        }
 
         // execute the kernel
         int frame = 0;
+        auto start = std::chrono::high_resolution_clock::now();
         pathtrace(pbo_dptr, frame, iteration);
+        cudaDeviceSynchronize();
+        auto end = std::chrono::high_resolution_clock::now();
+        if (iteration > warmupIterations)
+        {
+            timedMs += std::chrono::duration<double, std::milli>(end - start).count();
+        }
 
         // unmap buffer object
-        cudaGLUnmapBufferObject(pbo);
+        if (!headless)
+        {
+            cudaGLUnmapBufferObject(pbo);
+        }
     }
     else
     {
+        int timed = iteration - warmupIterations;
+        if (timed > 0)
+        {
+            printf("Average %.3f ms per iteration over %d iterations\n", timedMs / timed, timed);
+        }
         saveImage();
         pathtraceFree();
         cudaDeviceReset();
